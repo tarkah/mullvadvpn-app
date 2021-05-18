@@ -12,13 +12,13 @@ pub mod logging;
 #[cfg(not(target_os = "android"))]
 pub mod management_interface;
 mod relays;
+mod resolver;
 #[cfg(not(target_os = "android"))]
 pub mod rpc_uniqueness_check;
 pub mod runtime;
 pub mod settings;
 pub mod version;
 mod version_check;
-mod resolver;
 
 use futures::{
     channel::{mpsc, oneshot},
@@ -642,7 +642,7 @@ where
         let tunnel_command_tx = tunnel_state_machine::spawn(
             settings.allow_lan,
             settings.block_when_disconnected,
-            Self::get_dns_resolvers(&settings.tunnel_options.dns_options),
+            Some(vec!["127.0.0.1".parse().unwrap()]),
             initial_api_endpoint,
             tunnel_parameters_generator,
             log_dir,
@@ -707,6 +707,7 @@ where
         Ok(daemon)
     }
 
+    #[allow(dead_code)]
     fn get_dns_resolvers(options: &DnsOptions) -> Option<Vec<IpAddr>> {
         match options.state {
             DnsState::Default => {
@@ -1940,9 +1941,9 @@ where
                 Self::oneshot_send(tx, Ok(()), "set_dns_options response");
                 if settings_changed {
                     let settings = self.settings.to_settings();
-                    let resolvers = Self::get_dns_resolvers(&settings.tunnel_options.dns_options);
+                    let _resolvers = Self::get_dns_resolvers(&settings.tunnel_options.dns_options);
                     self.event_listener.notify_settings(settings);
-                    self.send_tunnel_command(TunnelCommand::Dns(resolvers));
+                    // self.send_tunnel_command(TunnelCommand::Dns(resolvers));
                 }
             }
             Err(e) => {
