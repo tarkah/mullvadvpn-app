@@ -22,7 +22,10 @@ pub struct Firewall {
     pf: pfctl::PfCtl,
     pf_was_enabled: Option<bool>,
     rule_logging: RuleLogging,
+    exclusion_gid: Option<u32>,
 }
+
+impl Firewall {}
 
 impl FirewallT for Firewall {
     type Error = Error;
@@ -43,6 +46,7 @@ impl FirewallT for Firewall {
             pf: pfctl::PfCtl::new()?,
             pf_was_enabled: None,
             rule_logging,
+            exclusion_gid: crate::macos::get_exclusion_gid(),
         })
     }
 
@@ -304,13 +308,36 @@ impl Firewall {
     }
 
     fn get_allow_loopback_rules(&self) -> Result<Vec<pfctl::FilterRule>> {
+        let mut rules = vec![];
         let lo0_rule = self
             .create_rule_builder(FilterRuleAction::Pass)
             .quick(true)
             .interface("lo0")
             .keep_state(pfctl::StatePolicy::Keep)
             .build()?;
-        Ok(vec![lo0_rule])
+        rules.push(lo0_rule);
+
+
+        let apple_subnet: IpNetwork = "17.0.0.0/8".parse().unwrap();
+        let allow_apple_subnet = self
+            .create_rule_builder(FilterRuleAction::Pass)
+            .quick(true)
+            .from(pfctl::Ip::Any)
+            .to(pfctl::Ip::from(apple_subnet))
+            .keep_state(pfctl::StatePolicy::Keep)
+            .build()?;
+        rules.push(allow_apple_subnet);
+
+        if let Some(gid) = self.exclusion_gid {
+            rules.push(
+                self.create_rule_builder(FilterRuleAction::Pass)
+                    .group(gid)
+                    .quick(true)
+                    .build()?,
+            );
+        }
+
+        Ok(rules)
     }
 
     fn get_allow_lan_rules(&self) -> Result<Vec<pfctl::FilterRule>> {
