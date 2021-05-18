@@ -61,6 +61,20 @@ impl ErrorState {
             }
         }
     }
+
+    fn set_dns(shared_values: &mut SharedTunnelStateValues) {
+        if let Some(ref dns_servers) = &shared_values.dns_servers {
+            if let Err(err) = shared_values.dns_monitor.set("lo0", &dns_servers) {
+                log::error!("failed to set custom DNS servers: {}", err);
+            }
+        }
+    }
+
+    fn reset_dns(shared_values: &mut SharedTunnelStateValues) {
+        if let Err(error) = shared_values.dns_monitor.reset() {
+            log::error!("{}", error.display_chain_with_msg("Unable to reset DNS"));
+        }
+    }
 }
 
 impl TunnelState for ErrorState {
@@ -70,6 +84,7 @@ impl TunnelState for ErrorState {
         shared_values: &mut SharedTunnelStateValues,
         block_reason: Self::Bootstrap,
     ) -> (TunnelStateWrapper, TunnelStateTransition) {
+        Self::set_dns(shared_values);
         #[cfg(not(target_os = "android"))]
         let block_failure = Self::set_firewall_policy(shared_values).err();
         #[cfg(target_os = "android")]
@@ -137,15 +152,20 @@ impl TunnelState for ErrorState {
             Some(TunnelCommand::IsOffline(is_offline)) => {
                 shared_values.is_offline = is_offline;
                 if !is_offline && self.block_reason == ErrorStateCause::IsOffline {
+                    Self::reset_dns(shared_values);
                     NewState(ConnectingState::enter(shared_values, 0))
                 } else {
                     SameState(self.into())
                 }
             }
-            Some(TunnelCommand::Connect) => NewState(ConnectingState::enter(shared_values, 0)),
+            Some(TunnelCommand::Connect) => {
+                Self::reset_dns(shared_values);
+                NewState(ConnectingState::enter(shared_values, 0))
+            }
             Some(TunnelCommand::Disconnect) | None => {
                 #[cfg(target_os = "linux")]
                 shared_values.reset_connectivity_check();
+                Self::reset_dns(shared_values);
                 NewState(DisconnectedState::enter(shared_values, true))
             }
             Some(TunnelCommand::Block(reason)) => {

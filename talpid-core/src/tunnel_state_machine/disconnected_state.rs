@@ -19,6 +19,7 @@ impl DisconnectedState {
                 allow_lan: shared_values.allow_lan,
                 allowed_endpoint: shared_values.allowed_endpoint.clone(),
             };
+            Self::set_dns(shared_values);
             shared_values.firewall.apply_policy(policy).map_err(|e| {
                 e.display_chain_with_msg(
                     "Failed to apply blocking firewall policy for disconnected state",
@@ -34,6 +35,20 @@ impl DisconnectedState {
         };
         if let Err(error_chain) = result {
             log::error!("{}", error_chain);
+        }
+    }
+
+    fn set_dns(shared_values: &mut SharedTunnelStateValues) {
+        if let Some(ref dns_servers) = shared_values.dns_servers {
+            if let Err(err) = shared_values.dns_monitor.set("lo0", &dns_servers) {
+                log::error!("failed to set custom DNS servers: {}", err);
+            }
+        }
+    }
+
+    fn reset_dns(shared_values: &mut SharedTunnelStateValues) {
+        if let Err(error) = shared_values.dns_monitor.reset() {
+            log::error!("{}", error.display_chain_with_msg("Unable to reset DNS"));
         }
     }
 }
@@ -92,12 +107,18 @@ impl TunnelState for DisconnectedState {
                 shared_values
                     .set_dns_servers(servers)
                     .expect("Failed to reconnect after changing custom DNS servers");
+                Self::set_dns(shared_values);
 
                 SameState(self.into())
             }
             Some(TunnelCommand::BlockWhenDisconnected(block_when_disconnected)) => {
                 if shared_values.block_when_disconnected != block_when_disconnected {
                     shared_values.block_when_disconnected = block_when_disconnected;
+                    if block_when_disconnected {
+                        Self::set_dns(shared_values);
+                    } else {
+                        Self::reset_dns(shared_values);
+                    }
                     Self::set_firewall_policy(shared_values, true);
                 }
                 SameState(self.into())
@@ -108,6 +129,7 @@ impl TunnelState for DisconnectedState {
             }
             Some(TunnelCommand::Connect) => NewState(ConnectingState::enter(shared_values, 0)),
             Some(TunnelCommand::Block(reason)) => {
+                Self::reset_dns(shared_values);
                 NewState(ErrorState::enter(shared_values, reason))
             }
             #[cfg(target_os = "android")]
@@ -116,7 +138,10 @@ impl TunnelState for DisconnectedState {
                 SameState(self.into())
             }
             Some(_) => SameState(self.into()),
-            None => Finished,
+            None => {
+                Self::reset_dns(shared_values);
+                Finished
+            }
         }
     }
 }
