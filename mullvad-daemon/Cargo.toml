@@ -31,6 +31,8 @@ trust-dns-server = { version = "0.20.3", features = [ "trust-dns-resolver" ] }
 trust-dns-client = "0.20.3"
 trust-dns-proto = "0.20.3"
 
+tokio1 = { version = "1", features =  [ "fs", "sync" ], package = "tokio" }
+
 mullvad-paths = { path = "../mullvad-paths" }
 mullvad-types = { path = "../mullvad-types" }
 mullvad-rpc = { path = "../mullvad-rpc" }

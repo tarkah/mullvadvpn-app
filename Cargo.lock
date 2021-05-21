@@ -1423,6 +1423,7 @@ dependencies = [
  "talpid-platform-metadata",
  "talpid-types",
  "tokio 0.2.25",
+ "tokio 1.6.0",
  "triggered",
  "trust-dns-client",
  "trust-dns-proto",
