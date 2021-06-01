@@ -1,16 +1,22 @@
 use trust_dns_client::rr::LowerName;
 use trust_dns_proto::rr::domain::Name;
 
-use std::sync::{Arc, RwLock};
+use std::{
+    future::Future,
+    sync::{Arc, RwLock},
+};
 
+use futures::future;
 use tokio1::{
     net::{TcpListener, UdpSocket},
     runtime::Runtime,
 };
 
+use trust_dns_client::{op::LowerQuery, rr::RecordType};
 use trust_dns_server::{
     authority::{Catalog, ZoneType},
     resolver::config::NameServerConfigGroup,
+    server::{Request, RequestHandler, ResponseHandler},
     store::forwarder::{ForwardAuthority, ForwardConfig},
     ServerFuture,
 };
@@ -48,15 +54,67 @@ async fn forwarder_authority() -> Result<ForwardAuthority, String> {
 
     ForwardAuthority::try_from_config(Name::root(), ZoneType::Forward, &config).await
 }
+
+struct FilteringHandler {
+    catalog: Catalog,
+    allowed_zones: Vec<LowerName>,
+}
+
+impl FilteringHandler {
+    async fn new() -> Result<Self, String> {
+        let mut catalog = Catalog::new();
+
+        catalog.upsert(
+            LowerName::new(&Name::root()),
+            Box::new(Arc::new(RwLock::new(forwarder_authority().await?))),
+        );
+        Ok(Self {
+            catalog,
+            allowed_zones: vec![],
+        })
+    }
+
+    fn should_allow_request(&self, request: &Request) -> bool {
+        request
+            .message
+            .queries()
+            .iter()
+            .all(|query| self.allow_query(query)) && request.src.ip().is_loopback()
+    }
+
+    fn allow_query(&self, query: &LowerQuery) -> bool {
+        const ALLOWED_RECORD_TYPES: &[RecordType] =
+            &[RecordType::A, RecordType::AAAA, RecordType::CNAME];
+        ALLOWED_RECORD_TYPES.contains(&query.query_type())
+            && self
+                .allowed_zones
+                .iter()
+                .any(|zone| query.name().zone_of(zone))
+    }
+}
+
+impl RequestHandler for FilteringHandler {
+    type ResponseFuture = std::pin::Pin<Box<dyn Future<Output = ()> + Send>>;
+
+    fn handle_request<R: ResponseHandler>(
+        &self,
+        request: Request,
+        mut response_handle: R,
+    ) -> Self::ResponseFuture {
+        match request.message.message_type() {
+            MessageType::Query => {
+                if !self.should_allow_request(&request) {
+                    return Box::pin(async {});
+                }
+                Box::pin(async {})
+            },
+            _ => Box::pin(async {})
+        }
+    }
+}
+
 async fn run_resolver() -> Result<(), String> {
-    let mut catalog = Catalog::new();
-
-    catalog.upsert(
-        LowerName::new(&Name::root()),
-        Box::new(Arc::new(RwLock::new(forwarder_authority().await?))),
-    );
-
-    let mut server_future = ServerFuture::new(catalog);
+    let mut server_future = ServerFuture::new(FilteringHandler::new().await?);
     let udp_sock = UdpSocket::bind("0.0.0.0:53")
         .await
         .map_err(|err| format!("{}", err))?;
