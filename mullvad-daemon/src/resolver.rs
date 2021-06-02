@@ -1,5 +1,8 @@
 use trust_dns_client::rr::LowerName;
-use trust_dns_proto::rr::domain::Name;
+use trust_dns_proto::{
+    op::{header::MessageType, op_code::OpCode},
+    rr::domain::Name,
+};
 
 use std::{
     future::Future,
@@ -14,7 +17,7 @@ use tokio1::{
 
 use trust_dns_client::{op::LowerQuery, rr::RecordType};
 use trust_dns_server::{
-    authority::{Catalog, ZoneType},
+    authority::{Catalog, MessageRequest, ZoneType},
     resolver::config::NameServerConfigGroup,
     server::{Request, RequestHandler, ResponseHandler},
     store::forwarder::{ForwardAuthority, ForwardConfig},
@@ -58,6 +61,7 @@ async fn forwarder_authority() -> Result<ForwardAuthority, String> {
 struct FilteringHandler {
     catalog: Catalog,
     allowed_zones: Vec<LowerName>,
+    forward_auth: ForwardAuthority,
 }
 
 impl FilteringHandler {
@@ -71,6 +75,7 @@ impl FilteringHandler {
         Ok(Self {
             catalog,
             allowed_zones: vec![],
+            forward_auth: forwarder_authority().await?,
         })
     }
 
@@ -79,17 +84,28 @@ impl FilteringHandler {
             .message
             .queries()
             .iter()
-            .all(|query| self.allow_query(query)) && request.src.ip().is_loopback()
+            .all(|query| self.allow_query(query))
+            && request.src.ip().is_loopback()
     }
 
     fn allow_query(&self, query: &LowerQuery) -> bool {
         const ALLOWED_RECORD_TYPES: &[RecordType] =
             &[RecordType::A, RecordType::AAAA, RecordType::CNAME];
         ALLOWED_RECORD_TYPES.contains(&query.query_type())
-            && self
-                .allowed_zones
-                .iter()
-                .any(|zone| query.name().zone_of(zone))
+            && self.allowed_zones.iter().any(|zone| zone == query.name())
+    }
+
+    fn lookup(
+        &self,
+        message: &MessageRequest,
+        response_handler: &mut impl ResponseHandler,
+    ) -> impl Future<Output = ()> + 'static {
+        async { () }
+        // unimplemented!()
+    }
+
+    fn update(&self, message: &MessageRequest, response_handler: &mut impl ResponseHandler) {
+        unimplemented!()
     }
 }
 
@@ -106,9 +122,19 @@ impl RequestHandler for FilteringHandler {
                 if !self.should_allow_request(&request) {
                     return Box::pin(async {});
                 }
-                Box::pin(async {})
-            },
-            _ => Box::pin(async {})
+                match request.message.op_code() {
+                    OpCode::Query => {
+                        return Box::pin(self.lookup(&request.message, &mut response_handle));
+                    }
+                    OpCode::Update => {
+                        // TODO: this should be a future
+                        self.update(&request.message, &mut response_handle);
+                        return Box::pin(async {});
+                    }
+                    _ =>  { return Box::pin(async {});  },
+                };
+            }
+            _ => Box::pin(async {}),
         }
     }
 }
