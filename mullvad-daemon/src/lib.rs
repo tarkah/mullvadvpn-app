@@ -12,7 +12,7 @@ pub mod logging;
 #[cfg(not(target_os = "android"))]
 pub mod management_interface;
 mod relays;
-mod resolver;
+pub mod resolver;
 #[cfg(not(target_os = "android"))]
 pub mod rpc_uniqueness_check;
 pub mod runtime;
