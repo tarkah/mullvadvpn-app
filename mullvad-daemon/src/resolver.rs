@@ -19,10 +19,10 @@ use tokio1::{
 use trust_dns_client::{op::LowerQuery, rr::RecordType};
 use trust_dns_server::{
     authority::{
-        AuthLookup, Authority, Catalog, EmptyLookup, LookupObject, MessageRequest,
+        Authority, EmptyLookup, LookupObject, MessageRequest, MessageResponse,
         MessageResponseBuilder, ZoneType,
     },
-    client::rr::dnssec::{Algorithm, SupportedAlgorithms},
+    client::rr::dnssec::{SupportedAlgorithms},
     resolver::config::NameServerConfigGroup,
     server::{Request, RequestHandler, ResponseHandler},
     store::forwarder::{ForwardAuthority, ForwardConfig},
@@ -56,21 +56,15 @@ pub fn run_resolver() {
     }
 }
 
-async fn forwarder_authority() -> Result<ForwardAuthority, String> {
-    let config = ForwardConfig {
-        name_servers: NameServerConfigGroup::cloudflare(),
-        options: None,
-    };
 
-    ForwardAuthority::try_from_config(Name::root(), ZoneType::Forward, &config).await
-}
-
-struct FilteringHandler {
+struct FilteringResolver {
     allowed_zones: Vec<LowerName>,
-    forward_auth: ForwardAuthority,
+    forwarder_config: ForwardConfig,
+    passthrough: bool,
 }
 
-impl FilteringHandler {
+
+impl FilteringResolver {
     async fn new() -> Result<Self, String> {
         Ok(Self {
             allowed_zones: vec![
@@ -78,7 +72,11 @@ impl FilteringHandler {
                 LowerName::from(Name::from_str("apple.com").unwrap()),
                 LowerName::from(Name::from_str("www.apple.com").unwrap()),
             ],
-            forward_auth: forwarder_authority().await?,
+            forwarder_config: ForwardConfig {
+                name_servers: NameServerConfigGroup::cloudflare(),
+                options: None,
+            },
+            passthrough: false,
         })
     }
 
@@ -103,20 +101,22 @@ impl FilteringHandler {
         message: MessageRequest,
         mut response_handler: R,
     ) -> impl Future<Output = ()> + 'static {
+        let config = ForwardConfig {
+            name_servers: self.forwarder_config.name_servers.clone(),
+            options: self.forwarder_config.options.clone(),
+        };
         async move {
-            let resolver = match forwarder_authority().await {
-                Ok(ok) => ok,
-                Err(err) => {
-                    log::error!("failed to construct a forwarder authority: {}", err);
-                    return;
-                }
-            };
-            for query in message.queries() {
-                let mut response_header = Header::new();
-                response_header.set_id(message.id());
-                response_header.set_op_code(OpCode::Query);
-                response_header.set_message_type(MessageType::Response);
-                response_header.set_authoritative(false);
+            let resolver =
+                match ForwardAuthority::try_from_config(Name::root(), ZoneType::Forward, &config)
+                    .await
+                {
+                    Ok(resolver) => resolver,
+                    Err(err) => {
+                        log::error!("failed to construct a forwarder authority: {}", err);
+                        return;
+                    }
+                };
+            for query in message.queries().clone() {
                 let lookup_result: Box<dyn LookupObject> = resolver
                     .search(&query, false, SupportedAlgorithms::new())
                     .await
@@ -125,20 +125,9 @@ impl FilteringHandler {
                         log::error!("error resolving: {}", err);
                         Box::new(EmptyLookup) as Box<dyn LookupObject>
                     });
+                log::error!("FINISHED WAITING ON A RESPONSE");
+                let response = Self::build_response(&message, &lookup_result);
 
-                if !lookup_result.is_empty() {
-                    for addr in lookup_result.iter() {
-                        log::error!("GOT LOOKUP RESULT- {:?}", addr);
-                    }
-                }
-                let response = MessageResponseBuilder::new(Some(message.raw_queries())).build(
-                    response_header,
-                    lookup_result.iter(),
-                    // forwarder responses only contain query answers, no ns,soa or additionals
-                    Box::new(std::iter::empty()) as Box<dyn Iterator<Item = _> + Send>,
-                    Box::new(std::iter::empty()) as Box<dyn Iterator<Item = _> + Send>,
-                    Box::new(std::iter::empty()) as Box<dyn Iterator<Item = _> + Send>,
-                );
                 if let Err(err) = response_handler.send_response(response) {
                     log::error!("Failed to send response: {}", err);
                 }
@@ -146,12 +135,31 @@ impl FilteringHandler {
         }
     }
 
-    fn update(&self, message: &MessageRequest, response_handler: &mut impl ResponseHandler) {
-        unimplemented!()
+    fn update(&self, message: &MessageRequest, _response_handler: &mut impl ResponseHandler) {
+        log::error!("received update message {:?}", message);
+    }
+
+    fn build_response<'a>(
+        message: &'a MessageRequest,
+        lookup: &'a Box<dyn LookupObject>,
+    ) -> MessageResponse<'a, 'a> {
+        let mut response_header = Header::new();
+        response_header.set_id(message.id());
+        response_header.set_op_code(OpCode::Query);
+        response_header.set_message_type(MessageType::Response);
+        response_header.set_authoritative(false);
+        MessageResponseBuilder::new(Some(message.raw_queries())).build(
+            response_header,
+            lookup.iter(),
+            // forwarder responses only contain query answers, no ns,soa or additionals
+            Box::new(std::iter::empty()) as Box<dyn Iterator<Item = _> + Send>,
+            Box::new(std::iter::empty()) as Box<dyn Iterator<Item = _> + Send>,
+            Box::new(std::iter::empty()) as Box<dyn Iterator<Item = _> + Send>,
+        )
     }
 }
 
-impl RequestHandler for FilteringHandler {
+impl RequestHandler for FilteringResolver {
     type ResponseFuture = std::pin::Pin<Box<dyn Future<Output = ()> + Send>>;
 
     fn handle_request<R: ResponseHandler>(
@@ -184,11 +192,11 @@ impl RequestHandler for FilteringHandler {
 }
 
 async fn run_resolver_inner() -> Result<(), String> {
-    let mut server_future = ServerFuture::new(FilteringHandler::new().await?);
-    let udp_sock = UdpSocket::bind("0.0.0.0:53")
+    let mut server_future = ServerFuture::new(FilteringResolver::new().await?);
+    let udp_sock = UdpSocket::bind("0.0.0.0:1053")
         .await
         .map_err(|err| format!("{}", err))?;
-    let tcp_sock = TcpListener::bind("0.0.0.0:53")
+    let tcp_sock = TcpListener::bind("0.0.0.0:1053")
         .await
         .map_err(|err| format!("{}", err))?;
     server_future.register_socket(udp_sock);
