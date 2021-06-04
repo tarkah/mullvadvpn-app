@@ -1,6 +1,6 @@
 use trust_dns_proto::{
     op::{header::MessageType, op_code::OpCode, Header},
-    rr::domain::Name,
+    rr::{domain::Name, record_data::RData},
 };
 
 use std::{
@@ -12,7 +12,8 @@ use std::{
 
 use futures::{
     channel::{mpsc, oneshot},
-    future, SinkExt, StreamExt,
+    future::{self, Either},
+    SinkExt, StreamExt,
 };
 use tokio1::{
     net::{TcpListener, UdpSocket},
@@ -69,7 +70,7 @@ struct FilteringResolver {
     rx: mpsc::Receiver<ResolverMessage>,
     filtering_state: FilteringState,
     resolver: ForwardAuthority,
-    command_sender: mpsc::Sender<IpAddr>,
+    command_sender: mpsc::Sender<(Vec<IpAddr>, oneshot::Sender<()>)>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -86,7 +87,9 @@ pub enum ResolverMessage {
 
 
 impl FilteringResolver {
-    async fn new(command_sender: mpsc::Sender<IpAddr>) -> Result<(Self, mpsc::Sender<ResolverMessage>), String> {
+    async fn new(
+        command_sender: mpsc::Sender<(Vec<IpAddr>, oneshot::Sender<()>)>,
+    ) -> Result<(Self, mpsc::Sender<ResolverMessage>), String> {
         let (tx, rx) = mpsc::channel(0);
         let forwarder_config = ForwardConfig {
             name_servers: NameServerConfigGroup::cloudflare(),
@@ -111,7 +114,7 @@ impl FilteringResolver {
                     options: None,
                 },
                 resolver,
-                filtering_state: FilteringState::Off,
+                filtering_state: FilteringState::On,
                 rx,
                 command_sender,
             },
@@ -123,32 +126,60 @@ impl FilteringResolver {
         use ResolverMessage::*;
         while let Some(message) = self.rx.next().await {
             match message {
-                Request(query, tx) => {}
+                Request(query, tx) => {
+                    tokio1::spawn(self.resolve(query, tx));
+                }
                 SetFilteringState(filtering_state, tx) => {}
                 SetResolverIps(resolvers, tx) => {}
             }
         }
     }
 
-    fn resolve(&mut self, query: LowerQuery, tx: oneshot::Sender<Box<dyn LookupObject>>) -> impl Future<Output=()> {
-        if !self.should_allow_request(query) {
+    fn resolve(
+        &mut self,
+        query: LowerQuery,
+        tx: oneshot::Sender<Box<dyn LookupObject>>,
+    ) -> impl Future<Output = ()> {
+        let empty_response = Box::new(EmptyLookup) as Box<dyn LookupObject>;
+        if !self.should_allow_request(&query) {
             log::debug!("Blocking query {:?}", query);
-            let empty_response = Box::new(EmptyLookup) as Box<dyn LookupObject>;
             tx.send(empty_response);
-            Either::B(async {  })
+            return Either::Left(async {});
         }
 
-        let lookup = self.resolver.search(&query, false, SupportedAlgorithms::new());
-        Either::A(
-            async move {
-                match lookup.await {
-                    Ok(result) => {
-
+        let mut unblock_tx = self.command_sender.clone();
+        let lookup = self
+            .resolver
+            .search(&query, false, SupportedAlgorithms::new());
+        Either::Right(async move {
+            match lookup.await {
+                Ok(result) => {
+                    let ip_records = result
+                        .iter()
+                        .filter_map(|record| match record.rdata() {
+                            RData::A(ipv4) => Some(IpAddr::from(*ipv4)),
+                            RData::AAAA(ipv6) => Some(IpAddr::from(*ipv6)),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    if !ip_records.is_empty() {
+                        let (done_tx, done_rx) = oneshot::channel();
+                        if unblock_tx.send((ip_records, done_tx)).await.is_ok() {
+                            let _ = done_rx.await;
+                        } else {
+                            log::error!("Failed to send IPs to unblocker");
+                        }
+                    }
+                    if tx.send(Box::new(result)).is_err() {
+                        log::error!("Failed to send response to resolver");
                     }
                 }
-
+                Err(err) => {
+                    log::trace!("Failed to resolve {}: {}", query, err);
+                    let _ = tx.send(empty_response);
+                }
             }
-        )
+        })
     }
 
     fn should_allow_request(&self, query: &LowerQuery) -> bool {
@@ -253,7 +284,8 @@ impl RequestHandler for ResolverImpl {
 
 
 async fn run_resolver_inner() -> Result<(), String> {
-    let (resolver, handle) = FilteringResolver::new().await?;
+    let (tx, mut rx) = mpsc::channel(1);
+    let (resolver, handle) = FilteringResolver::new(tx).await?;
     let resolver_handle = ResolverImpl { tx: handle.clone() };
     let mut server_future = ServerFuture::new(resolver_handle);
     let udp_sock = UdpSocket::bind("0.0.0.0:1053")
@@ -264,6 +296,16 @@ async fn run_resolver_inner() -> Result<(), String> {
         .map_err(|err| format!("{}", err))?;
     server_future.register_socket(udp_sock);
     server_future.register_listener(tcp_sock, std::time::Duration::from_secs(1));
+    tokio1::spawn(async move {
+        while let Some((ips, done_tx)) = rx.next().await {
+            log::error!("received IPs that should be unblocked: {:?}", ips);
+            let _ = done_tx.send(());
+        }
+    });
+    tokio1::spawn(async move {
+        resolver.run().await;
+        log::error!("resolver stoppped");
+    });
     server_future
         .block_until_done()
         .await
