@@ -18,6 +18,7 @@ impl DisconnectedState {
             let policy = FirewallPolicy::Blocked {
                 allow_lan: shared_values.allow_lan,
                 allowed_endpoint: shared_values.allowed_endpoint.clone(),
+                allowed_ips: shared_values.allowed_ips.clone(),
             };
             Self::set_dns(shared_values);
             shared_values.firewall.apply_policy(policy).map_err(|e| {
@@ -81,6 +82,13 @@ impl TunnelState for DisconnectedState {
         use self::EventConsequence::*;
 
         match runtime.block_on(commands.next()) {
+            Some(TunnelCommand::SetAllowedIps(allowed_ips, done_tx)) => {
+                if shared_values.set_allowed_ips(allowed_ips) {
+                    Self::set_firewall_policy(shared_values, true);
+                }
+                let _ = done_tx.send(());
+                SameState(self.into())
+            },
             Some(TunnelCommand::AllowLan(allow_lan)) => {
                 if shared_values.allow_lan != allow_lan {
                     // The only platform that can fail is Android, but Android doesn't support the

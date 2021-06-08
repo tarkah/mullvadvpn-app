@@ -28,6 +28,11 @@ impl DisconnectingState {
 
         self.after_disconnect = match after_disconnect {
             AfterDisconnect::Nothing => match command {
+                Some(TunnelCommand::SetAllowedIps(allowed_ips, done_tx)) => {
+                    let _ = shared_values.set_allowed_ips(allowed_ips);
+                    let _ = done_tx.send(());
+                    AfterDisconnect::Nothing
+                }
                 Some(TunnelCommand::AllowLan(allow_lan)) => {
                     let _ = shared_values.set_allow_lan(allow_lan);
                     AfterDisconnect::Nothing
@@ -61,6 +66,11 @@ impl DisconnectingState {
                 }
             },
             AfterDisconnect::Block(reason) => match command {
+                Some(TunnelCommand::SetAllowedIps(allowed_ips, done_tx)) => {
+                    let _ = shared_values.set_allowed_ips(allowed_ips);
+                    let _ = done_tx.send(());
+                    AfterDisconnect::Block(reason)
+                },
                 Some(TunnelCommand::AllowLan(allow_lan)) => {
                     let _ = shared_values.set_allow_lan(allow_lan);
                     AfterDisconnect::Block(reason)
@@ -103,6 +113,12 @@ impl DisconnectingState {
                     let _ = shared_values.set_allow_lan(allow_lan);
                     AfterDisconnect::Reconnect(retry_attempt)
                 }
+
+                Some(TunnelCommand::SetAllowedIps(allowed_ips, done_tx)) => {
+                    let _ = shared_values.set_allowed_ips(allowed_ips);
+                    let _ = done_tx.send(());
+                    AfterDisconnect::Reconnect(retry_attempt)
+                },
                 Some(TunnelCommand::AllowEndpoint(endpoint, tx)) => {
                     let _ = shared_values.set_allowed_endpoint(endpoint);
                     if let Err(_) = tx.send(()) {

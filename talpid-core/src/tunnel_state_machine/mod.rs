@@ -26,7 +26,7 @@ use futures::{
 #[cfg(target_os = "android")]
 use std::os::unix::io::RawFd;
 use std::{
-    collections::HashSet,
+    collections::{HashSet, BTreeSet},
     io,
     net::IpAddr,
     path::{Path, PathBuf},
@@ -170,7 +170,7 @@ pub enum TunnelCommand {
     #[cfg(target_os = "android")]
     BypassSocket(RawFd, oneshot::Sender<()>),
     /// Sets IP addresses which should be allowed to pass through the firewall.
-    SetAllowedIps( BTreeSet<IpAddr> ),
+    SetAllowedIps( BTreeSet<IpAddr>, oneshot::Sender<()>, ),
 }
 
 type TunnelCommandReceiver = stream::Fuse<mpsc::UnboundedReceiver<TunnelCommand>>;
@@ -256,6 +256,7 @@ impl TunnelStateMachine {
             tun_provider,
             log_dir,
             resource_dir,
+            allowed_ips: Default::default(),
             #[cfg(target_os = "linux")]
             connectivity_check_was_enabled: None,
         };
@@ -335,6 +336,8 @@ struct SharedTunnelStateValues {
     log_dir: Option<PathBuf>,
     /// Resource directory path.
     resource_dir: PathBuf,
+    /// IPs that are allowed to be bypassed
+    allowed_ips: BTreeSet<IpAddr>,
 
     /// NetworkManager's connecitivity check state.
     #[cfg(target_os = "linux")]
@@ -372,6 +375,15 @@ impl SharedTunnelStateValues {
             self.tun_provider
                 .set_allowed_endpoint(endpoint.address.ip());
 
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn set_allowed_ips(&mut self, allowed_ips: BTreeSet<IpAddr>) -> bool {
+        if self.allowed_ips != allowed_ips {
+            self.allowed_ips = allowed_ips ;
             true
         } else {
             false

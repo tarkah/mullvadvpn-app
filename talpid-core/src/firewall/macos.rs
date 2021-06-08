@@ -104,6 +104,8 @@ impl Firewall {
                 tunnel,
                 allow_lan,
                 allowed_endpoint,
+                allowed_ips,
+                pingable_hosts,
             } => {
                 let mut rules = vec![self.get_allow_relay_rule(peer_endpoint)?];
                 rules.push(self.get_allowed_endpoint_rule(allowed_endpoint)?);
@@ -150,6 +152,7 @@ impl Firewall {
             FirewallPolicy::Blocked {
                 allow_lan,
                 allowed_endpoint,
+                allowed_ips,
             } => {
                 let mut rules = Vec::new();
                 rules.push(self.get_allowed_endpoint_rule(allowed_endpoint)?);

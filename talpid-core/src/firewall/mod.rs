@@ -10,8 +10,8 @@ use std::net::IpAddr;
 use std::net::{Ipv4Addr, Ipv6Addr};
 #[cfg(windows)]
 use std::path::PathBuf;
+use std::{collections::BTreeSet, fmt, net::IpAddr};
 use talpid_types::net::Endpoint;
-
 
 #[cfg(target_os = "macos")]
 #[path = "macos.rs"]
@@ -82,7 +82,6 @@ const DHCPV6_SERVER_PORT: u16 = 547;
 #[cfg(all(unix, not(target_os = "android")))]
 const DHCPV6_CLIENT_PORT: u16 = 546;
 
-
 #[cfg(all(unix, not(target_os = "android")))]
 /// Returns whether an address belongs to a private subnet.
 pub fn is_local_address(address: &IpAddr) -> bool {
@@ -114,6 +113,8 @@ pub enum FirewallPolicy {
         /// A process that is allowed to send packets to the relay.
         #[cfg(windows)]
         relay_client: PathBuf,
+        /// A list of IPs that can be reached outside the tunnel.
+        allowed_ips: BTreeSet<IpAddr>,
     },
 
     /// Allow traffic only to server and over tunnel interface
@@ -138,6 +139,8 @@ pub enum FirewallPolicy {
         allow_lan: bool,
         /// Host that should be reachable while in the blocked state.
         allowed_endpoint: Endpoint,
+        /// A list of IPs that can be reached outside the tunnel.
+        allowed_ips: BTreeSet<IpAddr>,
     },
 }
 
@@ -198,6 +201,7 @@ impl fmt::Display for FirewallPolicy {
             FirewallPolicy::Blocked {
                 allow_lan,
                 allowed_endpoint,
+                ..
             } => write!(
                 f,
                 "Blocked. {} LAN. Allowing endpoint {}",
@@ -222,9 +226,6 @@ pub struct FirewallArguments {
     pub allow_lan: bool,
     /// This argument is required for the blocked state to configure the firewall correctly.
     pub allowed_endpoint: Option<Endpoint>,
-
-    /// Set of allowed IP addresses
-    pub allowed_ips: BTreeSet<IpAddr>,
 }
 
 impl Firewall {

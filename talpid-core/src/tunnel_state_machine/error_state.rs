@@ -22,6 +22,7 @@ impl ErrorState {
         let policy = FirewallPolicy::Blocked {
             allow_lan: shared_values.allow_lan,
             allowed_endpoint: shared_values.allowed_endpoint.clone(),
+            allowed_ips: shared_values.allowed_ips.clone(),
         };
 
         #[cfg(target_os = "linux")]
@@ -113,6 +114,13 @@ impl TunnelState for ErrorState {
         use self::EventConsequence::*;
 
         match runtime.block_on(commands.next()) {
+            Some(TunnelCommand::SetAllowedIps(allowed_ips, done_tx)) => {
+                    if shared_values.set_allowed_ips(allowed_ips) {
+                        let _ = Self::set_firewall_policy(shared_values);
+                    }
+                    let _ = done_tx.send(());
+                    SameState(self.into())
+            },
             Some(TunnelCommand::AllowLan(allow_lan)) => {
                 if let Err(error_state_cause) = shared_values.set_allow_lan(allow_lan) {
                     NewState(Self::enter(shared_values, error_state_cause))
