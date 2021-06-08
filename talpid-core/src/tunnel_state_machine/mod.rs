@@ -169,6 +169,8 @@ pub enum TunnelCommand {
     /// Bypass a socket, allowing traffic to flow through outside the tunnel.
     #[cfg(target_os = "android")]
     BypassSocket(RawFd, oneshot::Sender<()>),
+    /// Sets IP addresses which should be allowed to pass through the firewall.
+    SetAllowedIps( BTreeSet<IpAddr> ),
 }
 
 type TunnelCommandReceiver = stream::Fuse<mpsc::UnboundedReceiver<TunnelCommand>>;

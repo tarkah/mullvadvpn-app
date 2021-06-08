@@ -3,7 +3,8 @@ use ipnetwork::{IpNetwork, Ipv4Network, Ipv6Network};
 #[cfg(unix)]
 use lazy_static::lazy_static;
 use std::fmt;
-#[cfg(not(target_os = "android"))]
+use std::{collections::BTreeSet, net::IpAddr};
+#[cfg(windows)]
 use std::net::IpAddr;
 #[cfg(unix)]
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -221,6 +222,9 @@ pub struct FirewallArguments {
     pub allow_lan: bool,
     /// This argument is required for the blocked state to configure the firewall correctly.
     pub allowed_endpoint: Option<Endpoint>,
+
+    /// Set of allowed IP addresses
+    pub allowed_ips: BTreeSet<IpAddr>,
 }
 
 impl Firewall {
