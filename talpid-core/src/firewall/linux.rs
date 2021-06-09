@@ -690,7 +690,7 @@ impl<'a> PolicyBatch<'a> {
         self.batch.add(&out_rule, nftnl::MsgType::Add);
     }
 
-    fn add_allow_ip_rules<'b>(&mut self, mut addrs: impl Iterator<Item=&'b IpAddr>) {
+    fn add_allow_ip_rules<'b>(&mut self, mut addrs: impl Iterator<Item = &'b IpAddr>) {
         for addr in addrs {
             let mut in_rule = Rule::new(&self.in_chain);
             check_ip(&mut in_rule, End::Src, *addr);

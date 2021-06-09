@@ -2,6 +2,7 @@ use super::{FirewallArguments, FirewallPolicy, FirewallT};
 use ipnetwork::IpNetwork;
 use pfctl::{DropAction, FilterRuleAction, Uid};
 use std::{
+    collections::BTreeSet,
     env,
     net::{IpAddr, Ipv4Addr},
 };
@@ -109,6 +110,8 @@ impl Firewall {
             } => {
                 let mut rules = vec![self.get_allow_relay_rule(peer_endpoint)?];
                 rules.push(self.get_allowed_endpoint_rule(allowed_endpoint)?);
+                rules.append(&mut self.get_allow_ips_rules(&allowed_ips)?);
+                rules.extend(self.get_allow_pingable_hosts(&pingable_hosts)?);
 
                 // Important to block DNS after allow relay rule (so the relay can operate
                 // over port 53) but before allow LAN (so DNS does not leak to the LAN)
@@ -160,6 +163,7 @@ impl Firewall {
                     // Important to block DNS before allow LAN (so DNS does not leak to the LAN)
                     rules.append(&mut self.get_block_dns_rules()?);
                     rules.append(&mut self.get_allow_lan_rules()?);
+                    rules.append(&mut self.get_allow_ips_rules(&allowed_ips)?);
                 }
                 Ok(rules)
             }
@@ -320,7 +324,6 @@ impl Firewall {
             .build()?;
         rules.push(lo0_rule);
 
-
         let apple_subnet: IpNetwork = "17.0.0.0/8".parse().unwrap();
         let allow_apple_subnet = self
             .create_rule_builder(FilterRuleAction::Pass)
@@ -394,6 +397,31 @@ impl Firewall {
         rules.push(dhcpv4_out);
         rules.push(dhcpv4_in);
 
+        Ok(rules)
+    }
+
+    fn get_allow_ips_rules(
+        &self,
+        allowed_ips: &BTreeSet<IpAddr>,
+    ) -> Result<Vec<pfctl::FilterRule>> {
+        let mut rule_builder = self.create_rule_builder(FilterRuleAction::Pass);
+        rule_builder.quick(true);
+        let mut rules = Vec::with_capacity(allowed_ips.len() * 2);
+        for addr in allowed_ips.iter() {
+            let allow_in = rule_builder
+                .direction(pfctl::Direction::In)
+                .from(pfctl::Ip::Any)
+                .to(pfctl::Ip::from(*addr))
+                .build()?;
+            rules.push(allow_in);
+
+            let allow_out = rule_builder
+                .direction(pfctl::Direction::Out)
+                .from(pfctl::Ip::from(*addr))
+                .to(pfctl::Ip::Any)
+                .build()?;
+            rules.push(allow_out);
+        }
         Ok(rules)
     }
 

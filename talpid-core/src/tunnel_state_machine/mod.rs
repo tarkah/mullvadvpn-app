@@ -26,7 +26,7 @@ use futures::{
 #[cfg(target_os = "android")]
 use std::os::unix::io::RawFd;
 use std::{
-    collections::{HashSet, BTreeSet},
+    collections::{BTreeSet, HashSet},
     io,
     net::IpAddr,
     path::{Path, PathBuf},
@@ -170,7 +170,7 @@ pub enum TunnelCommand {
     #[cfg(target_os = "android")]
     BypassSocket(RawFd, oneshot::Sender<()>),
     /// Sets IP addresses which should be allowed to pass through the firewall.
-    SetAllowedIps( BTreeSet<IpAddr>, oneshot::Sender<()>, ),
+    SetAllowedIps(BTreeSet<IpAddr>, oneshot::Sender<()>),
 }
 
 type TunnelCommandReceiver = stream::Fuse<mpsc::UnboundedReceiver<TunnelCommand>>;
@@ -383,7 +383,7 @@ impl SharedTunnelStateValues {
 
     pub fn set_allowed_ips(&mut self, allowed_ips: BTreeSet<IpAddr>) -> bool {
         if self.allowed_ips != allowed_ips {
-            self.allowed_ips = allowed_ips ;
+            self.allowed_ips = allowed_ips;
             true
         } else {
             false

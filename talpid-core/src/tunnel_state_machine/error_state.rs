@@ -115,12 +115,12 @@ impl TunnelState for ErrorState {
 
         match runtime.block_on(commands.next()) {
             Some(TunnelCommand::SetAllowedIps(allowed_ips, done_tx)) => {
-                    if shared_values.set_allowed_ips(allowed_ips) {
-                        let _ = Self::set_firewall_policy(shared_values);
-                    }
-                    let _ = done_tx.send(());
-                    SameState(self.into())
-            },
+                if shared_values.set_allowed_ips(allowed_ips) {
+                    let _ = Self::set_firewall_policy(shared_values);
+                }
+                let _ = done_tx.send(());
+                SameState(self.into())
+            }
             Some(TunnelCommand::AllowLan(allow_lan)) => {
                 if let Err(error_state_cause) = shared_values.set_allow_lan(allow_lan) {
                     NewState(Self::enter(shared_values, error_state_cause))

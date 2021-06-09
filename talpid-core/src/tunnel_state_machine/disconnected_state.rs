@@ -88,7 +88,7 @@ impl TunnelState for DisconnectedState {
                 }
                 let _ = done_tx.send(());
                 SameState(self.into())
-            },
+            }
             Some(TunnelCommand::AllowLan(allow_lan)) => {
                 if shared_values.allow_lan != allow_lan {
                     // The only platform that can fail is Android, but Android doesn't support the
