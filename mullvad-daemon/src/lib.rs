@@ -4,7 +4,6 @@
 #[macro_use]
 extern crate serde;
 
-
 pub mod account_history;
 pub mod exception_logging;
 mod geoip;
@@ -19,6 +18,8 @@ pub mod runtime;
 pub mod settings;
 pub mod version;
 mod version_check;
+
+use resolver::ResolverMessage;
 
 use futures::{
     channel::{mpsc, oneshot},
@@ -45,6 +46,7 @@ use settings::SettingsPersister;
 #[cfg(target_os = "android")]
 use std::os::unix::io::RawFd;
 use std::{
+    collections::BTreeSet,
     marker::PhantomData,
     mem,
     net::IpAddr,
@@ -504,6 +506,7 @@ pub struct Daemon<L: EventListener> {
     shutdown_tasks: Vec<Pin<Box<dyn Future<Output = ()>>>>,
     /// oneshot channel that completes once the tunnel state machine has been shut down
     tunnel_state_machine_shutdown_signal: oneshot::Receiver<()>,
+    resolver_command_tx: Option<mpsc::Sender<ResolverMessage>>,
     cache_dir: PathBuf,
 }
 
@@ -528,7 +531,8 @@ where
         let address_change_tx = std::sync::Mutex::new(address_change_tx);
         let address_change_runtime = tokio::runtime::Handle::current();
 
-        resolver::start_resolver();
+        let (resolved_ip_tx, mut resolved_ip_rx) = mpsc::channel(0);
+        let resolver_command_tx = resolver::start_resolver(resolved_ip_tx).await;
 
         let mut rpc_runtime = mullvad_rpc::MullvadRpcRuntime::with_cache(
             tokio::runtime::Handle::current(),
@@ -566,7 +570,6 @@ where
             &resource_dir,
             &cache_dir,
         );
-
 
         let mut settings = SettingsPersister::load(&settings_dir).await;
 
@@ -620,7 +623,6 @@ where
             tx: internal_event_tx.clone(),
         };
 
-
         let initial_target_state = if settings.get_account_token().is_some() {
             if settings.auto_connect {
                 // Note: Auto-connect overrides the cached target state
@@ -668,6 +670,24 @@ where
             }
         });
 
+        if resolver_command_tx.is_some() {
+            let tsm_resolver_allowed_ips = Arc::downgrade(&tunnel_command_tx);
+            tokio::spawn(async move {
+                let mut allowed_ips: BTreeSet<_> = BTreeSet::new();
+                while let Some((new_allowed_ips, done_tx)) = resolved_ip_rx.next().await {
+                    if let Some(tx) = tsm_resolver_allowed_ips.upgrade() {
+                        allowed_ips.extend(new_allowed_ips.into_iter());
+                        let _ = tx.unbounded_send(TunnelCommand::SetAllowedIps(
+                            allowed_ips.clone(),
+                            done_tx,
+                        ));
+                    } else {
+                        return;
+                    }
+                }
+            });
+        }
+
         let wireguard_key_manager =
             wireguard::KeyManager::new(internal_event_tx.clone(), rpc_handle.clone());
 
@@ -700,11 +720,20 @@ where
             shutdown_tasks: vec![],
             tunnel_state_machine_shutdown_signal,
             cache_dir,
+            resolver_command_tx,
         };
 
         daemon.ensure_wireguard_keys_for_current_account().await;
 
         Ok(daemon)
+    }
+
+    async fn set_resolver_filtering(&mut self, state: resolver::FilteringState) {
+        if let Some(command_tx) = self.resolver_command_tx.as_mut() {
+            let (done_tx, done_rx) = oneshot::channel();
+            let _ = command_tx.send(ResolverMessage::SetFilteringState(state, done_tx));
+            let _ = done_rx.await;
+        }
     }
 
     #[allow(dead_code)]
@@ -829,7 +858,6 @@ where
         )
     }
 
-
     async fn handle_event(&mut self, event: InternalDaemonEvent) {
         use self::InternalDaemonEvent::*;
         match event {
@@ -874,13 +902,26 @@ where
             TunnelStateTransition::Error(error_state) => TunnelState::Error(error_state),
         };
 
-
         self.unschedule_reconnect();
 
         debug!("New tunnel state: {:?}", tunnel_state);
         match tunnel_state {
-            TunnelState::Disconnected => self.state.disconnected(),
+            TunnelState::Connected { .. } => {
+                self.set_resolver_filtering(resolver::FilteringState::Off)
+                    .await;
+            }
+            TunnelState::Connecting { .. } => {
+                self.set_resolver_filtering(resolver::FilteringState::On)
+                    .await;
+            }
+            TunnelState::Disconnected => {
+                self.set_resolver_filtering(resolver::FilteringState::Off)
+                    .await;
+                self.state.disconnected();
+            }
             TunnelState::Error(ref error_state) => {
+                self.set_resolver_filtering(resolver::FilteringState::On)
+                    .await;
                 if error_state.is_blocking() {
                     info!(
                         "Blocking all network connections, reason: {}",
@@ -1129,7 +1170,6 @@ where
             job.abort();
         }
     }
-
 
     async fn handle_command(&mut self, command: DaemonCommand) {
         use self::DaemonCommand::*;
@@ -1910,7 +1950,6 @@ where
         Self::oneshot_send(tx, result, "on_set_bridge_state response");
     }
 
-
     async fn on_set_enable_ipv6(&mut self, tx: ResponseTx<(), settings::Error>, enable_ipv6: bool) {
         let save_result = self.settings.set_enable_ipv6(enable_ipv6).await;
         match save_result {
@@ -2321,7 +2360,6 @@ where
             result
         }
     }
-
 
     pub fn shutdown_handle(&self) -> DaemonShutdownHandle {
         DaemonShutdownHandle {
