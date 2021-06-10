@@ -31,17 +31,23 @@ use trust_dns_server::{
     },
     client::rr::dnssec::SupportedAlgorithms,
     resolver::config::NameServerConfigGroup,
-    server::{Request, RequestHandler, ResponseHandle, ResponseHandler},
+    server::{Request, RequestHandler, ResponseHandler},
     store::forwarder::{ForwardAuthority, ForwardConfig},
     ServerFuture,
 };
 
-
-pub fn start_resolver() {
-    std::thread::spawn(run_resolver);
+pub async fn start_resolver(
+    sender: mpsc::Sender<(Vec<IpAddr>, oneshot::Sender<()>)>,
+) -> Option<mpsc::Sender<ResolverMessage>> {
+    let (tx, rx) = oneshot::channel();
+    std::thread::spawn(|| run_resolver(sender, tx));
+    rx.await.map(Some).unwrap_or(None)
 }
 
-pub fn run_resolver() {
+pub fn run_resolver(
+    sender: mpsc::Sender<(Vec<IpAddr>, oneshot::Sender<()>)>,
+    done_tx: oneshot::Sender<mpsc::Sender<ResolverMessage>>,
+) {
     #[cfg(target_os = "macos")]
     if let Some(gid) = talpid_core::macos::get_exclusion_gid() {
         let ret = unsafe { libc::setgid(gid) };
@@ -55,14 +61,13 @@ pub fn run_resolver() {
 
     let rt = Runtime::new().expect("failed to initialize tokio runtime");
     log::debug!("Running DNS resolver");
-    match rt.block_on(run_resolver_inner()) {
+    match rt.block_on(run_resolver_inner(sender, done_tx)) {
         Ok(_) => {
             log::error!("Resolver stopped unexpectedly");
         }
         Err(err) => log::error!("Failed to run resolver: {}", err),
     }
 }
-
 
 struct FilteringResolver {
     allowed_zones: Vec<LowerName>,
@@ -85,7 +90,6 @@ pub enum ResolverMessage {
     SetResolverIps(Vec<IpAddr>, oneshot::Sender<()>),
 }
 
-
 impl FilteringResolver {
     async fn new(
         command_sender: mpsc::Sender<(Vec<IpAddr>, oneshot::Sender<()>)>,
@@ -100,7 +104,6 @@ impl FilteringResolver {
             ForwardAuthority::try_from_config(Name::root(), ZoneType::Forward, &forwarder_config)
                 .await
                 .map_err(|err| format!(" {}", err))?;
-
 
         Ok((
             Self {
@@ -129,8 +132,17 @@ impl FilteringResolver {
                 Request(query, tx) => {
                     tokio1::spawn(self.resolve(query, tx));
                 }
-                SetFilteringState(filtering_state, tx) => {}
-                SetResolverIps(resolvers, tx) => {}
+                SetFilteringState(filtering_state, tx) => {
+                    self.filtering_state = filtering_state;
+                    let _ = tx.send(());
+                }
+                SetResolverIps(resolvers, tx) => {
+                    self.forwarder_config = ForwardConfig {
+                        name_servers: NameServerConfigGroup::from_ips_clear(&resolvers, 53, false),
+                        options: None,
+                    };
+                    let _ = tx.send(());
+                }
             }
         }
     }
@@ -141,7 +153,7 @@ impl FilteringResolver {
         tx: oneshot::Sender<Box<dyn LookupObject>>,
     ) -> impl Future<Output = ()> {
         let empty_response = Box::new(EmptyLookup) as Box<dyn LookupObject>;
-        if !self.should_allow_request(&query) {
+        if !self.should_block_request(&query) {
             log::debug!("Blocking query {:?}", query);
             tx.send(empty_response);
             return Either::Left(async {});
@@ -182,15 +194,17 @@ impl FilteringResolver {
         })
     }
 
-    fn should_allow_request(&self, query: &LowerQuery) -> bool {
-        self.filtering_state == FilteringState::Off || self.allow_query(query)
+    fn should_block_request(&self, query: &LowerQuery) -> bool {
+        self.filtering_state == FilteringState::On && self.allow_query(query)
     }
 
     fn allow_query(&self, query: &LowerQuery) -> bool {
         const ALLOWED_RECORD_TYPES: &[RecordType] =
             &[RecordType::A, RecordType::AAAA, RecordType::CNAME];
-        ALLOWED_RECORD_TYPES.contains(&query.query_type())
-            && self.allowed_zones.iter().any(|zone| zone == query.name())
+        let apple_com: LowerName = LowerName::from(Name::from_str("apple.com").unwrap());
+        ALLOWED_RECORD_TYPES.contains(&query.query_type()) && query.name().zone_of(&apple_com)
+        // TODO: Revert to using a known list of allowed zones
+        // && self.allowed_zones.iter().any(|zone| zone == query.name())
     }
 }
 
@@ -235,11 +249,9 @@ impl ResolverImpl {
                 let _ = tx
                     .send(ResolverMessage::Request(query.clone(), lookup_tx))
                     .await;
-                let lookup_result: Box<dyn LookupObject> = lookup_rx.await.unwrap_or_else(|_| {
-                    log::error!("resolver dropped channel");
-                    Box::new(EmptyLookup) as Box<dyn LookupObject>
-                });
-                log::error!("FINISHED WAITING ON A RESPONSE");
+                let lookup_result: Box<dyn LookupObject> = lookup_rx
+                    .await
+                    .unwrap_or_else(|_| Box::new(EmptyLookup) as Box<dyn LookupObject>);
                 let response = Self::build_response(&message, &lookup_result);
 
                 if let Err(err) = response_handler.send_response(response) {
@@ -268,7 +280,6 @@ impl RequestHandler for ResolverImpl {
                         return Box::pin(self.lookup(request.message, response_handle));
                     }
                     OpCode::Update => {
-                        // TODO: this should be a future
                         self.update(&request.message, &mut response_handle);
                         return Box::pin(async {});
                     }
@@ -282,10 +293,11 @@ impl RequestHandler for ResolverImpl {
     }
 }
 
-
-async fn run_resolver_inner() -> Result<(), String> {
-    let (tx, mut rx) = mpsc::channel(1);
-    let (resolver, handle) = FilteringResolver::new(tx).await?;
+async fn run_resolver_inner(
+    command_sender: mpsc::Sender<(Vec<IpAddr>, oneshot::Sender<()>)>,
+    done_tx: oneshot::Sender<mpsc::Sender<ResolverMessage>>,
+) -> Result<(), String> {
+    let (resolver, handle) = FilteringResolver::new(command_sender).await?;
     let resolver_handle = ResolverImpl { tx: handle.clone() };
     let mut server_future = ServerFuture::new(resolver_handle);
     let udp_sock = UdpSocket::bind("0.0.0.0:1053")
@@ -296,12 +308,8 @@ async fn run_resolver_inner() -> Result<(), String> {
         .map_err(|err| format!("{}", err))?;
     server_future.register_socket(udp_sock);
     server_future.register_listener(tcp_sock, std::time::Duration::from_secs(1));
-    tokio1::spawn(async move {
-        while let Some((ips, done_tx)) = rx.next().await {
-            log::error!("received IPs that should be unblocked: {:?}", ips);
-            let _ = done_tx.send(());
-        }
-    });
+    let _ = done_tx.send(handle);
+
     tokio1::spawn(async move {
         resolver.run().await;
         log::error!("resolver stoppped");
