@@ -96,7 +96,14 @@ impl FilteringResolver {
     ) -> Result<(Self, mpsc::Sender<ResolverMessage>), String> {
         let (tx, rx) = mpsc::channel(0);
         let forwarder_config = ForwardConfig {
-            name_servers: NameServerConfigGroup::cloudflare(),
+            name_servers: NameServerConfigGroup::from_ips_clear(
+                &[
+                    "192.168.3.1".parse().unwrap(),
+                    "192.168.1.1".parse().unwrap(),
+                ],
+                53,
+                false,
+            ),
             options: None,
         };
 
@@ -154,11 +161,12 @@ impl FilteringResolver {
     ) -> impl Future<Output = ()> {
         let empty_response = Box::new(EmptyLookup) as Box<dyn LookupObject>;
         if !self.should_block_request(&query) {
-            log::debug!("Blocking query {:?}", query);
-            tx.send(empty_response);
+            log::error!("Blocking query {}", query);
+            let _ = tx.send(empty_response);
             return Either::Left(async {});
         }
 
+        log::error!("Will try to resolve {}", query);
         let mut unblock_tx = self.command_sender.clone();
         let lookup = self
             .resolver
@@ -175,6 +183,7 @@ impl FilteringResolver {
                         })
                         .collect::<Vec<_>>();
                     if !ip_records.is_empty() {
+                        log::error!("Successfully resolved {:?} to {:?}", query, ip_records);
                         let (done_tx, done_rx) = oneshot::channel();
                         if unblock_tx.send((ip_records, done_tx)).await.is_ok() {
                             let _ = done_rx.await;
@@ -195,7 +204,7 @@ impl FilteringResolver {
     }
 
     fn should_block_request(&self, query: &LowerQuery) -> bool {
-        self.filtering_state == FilteringState::On && self.allow_query(query)
+        self.filtering_state != FilteringState::Off || !self.allow_query(query)
     }
 
     fn allow_query(&self, query: &LowerQuery) -> bool {
@@ -270,7 +279,13 @@ impl RequestHandler for ResolverImpl {
         request: Request,
         mut response_handle: RT,
     ) -> Self::ResponseFuture {
+        log::error!(
+            "received a new request: {:?} from {:?}",
+            request.message,
+            request.src
+        );
         if !request.src.ip().is_loopback() {
+            log::error!("Dropping a stray request from outside: {}", request.src);
             return Box::pin(async {});
         }
         match request.message.message_type() {
@@ -300,10 +315,10 @@ async fn run_resolver_inner(
     let (resolver, handle) = FilteringResolver::new(command_sender).await?;
     let resolver_handle = ResolverImpl { tx: handle.clone() };
     let mut server_future = ServerFuture::new(resolver_handle);
-    let udp_sock = UdpSocket::bind("0.0.0.0:1053")
+    let udp_sock = UdpSocket::bind("0.0.0.0:53")
         .await
         .map_err(|err| format!("{}", err))?;
-    let tcp_sock = TcpListener::bind("0.0.0.0:1053")
+    let tcp_sock = TcpListener::bind("0.0.0.0:53")
         .await
         .map_err(|err| format!("{}", err))?;
     server_future.register_socket(udp_sock);
