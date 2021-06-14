@@ -686,6 +686,9 @@ where
                     }
                 }
             });
+        } else {
+            log::error!("LMAO NO RESOLVER ");
+            panic!("ZAIBAL");
         }
 
         let wireguard_key_manager =
