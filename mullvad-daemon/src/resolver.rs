@@ -119,10 +119,7 @@ impl FilteringResolver {
                     LowerName::from(Name::from_str("apple.com").unwrap()),
                     LowerName::from(Name::from_str("www.apple.com").unwrap()),
                 ],
-                forwarder_config: ForwardConfig {
-                    name_servers: NameServerConfigGroup::cloudflare(),
-                    options: None,
-                },
+                forwarder_config,
                 resolver,
                 filtering_state: FilteringState::On,
                 rx,
@@ -144,9 +141,15 @@ impl FilteringResolver {
                     let _ = tx.send(());
                 }
                 SetResolverIps(resolvers, tx) => {
-                    self.forwarder_config = ForwardConfig {
+                    let forwarder_config = ForwardConfig {
                         name_servers: NameServerConfigGroup::from_ips_clear(&resolvers, 53, false),
                         options: None,
+                    };
+                    match ForwardAuthority::try_from_config(Name::root(), ZoneType::Forward, &forwarder_config).await {
+                        Ok(resolver) => {
+                            self.forwarder_config = forwarder_config;
+                            self.resolver = resolver;
+                        }
                     };
                     let _ = tx.send(());
                 }
@@ -184,11 +187,13 @@ impl FilteringResolver {
                         .collect::<Vec<_>>();
                     if !ip_records.is_empty() {
                         log::error!("Successfully resolved {:?} to {:?}", query, ip_records);
-                        let (done_tx, done_rx) = oneshot::channel();
-                        if unblock_tx.send((ip_records, done_tx)).await.is_ok() {
-                            let _ = done_rx.await;
-                        } else {
-                            log::error!("Failed to send IPs to unblocker");
+                        if self.filtering_state == FilteringState::On {
+                            let (done_tx, done_rx) = oneshot::channel();
+                            if unblock_tx.send((ip_records, done_tx)).await.is_ok() {
+                                let _ = done_rx.await;
+                            } else {
+                                log::error!("Failed to send IPs to unblocker");
+                            }
                         }
                     }
                     if tx.send(Box::new(result)).is_err() {
