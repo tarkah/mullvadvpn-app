@@ -1,13 +1,21 @@
 use trust_dns_proto::{
-    op::{header::MessageType, op_code::OpCode, Header},
-    rr::{domain::Name, record_data::RData},
+    error::ProtoError,
+    iocompat::AsyncIoTokioAsStd,
+    op::{header::MessageType, op_code::OpCode, Header, NoopMessageFinalizer},
+    rr::{domain::Name, record_data::RData, Record},
+    tcp::{Connect, DnsTcpStream, TcpClientStream},
+    udp::{UdpClientStream, UdpSocket},
+    xfer::{DnsExchange, DnsRequest, DnsResponse},
+    DnsHandle, DnsMultiplexer, TokioTime,
 };
 
 use std::{
     future::Future,
-    net::IpAddr,
+    io,
+    net::{IpAddr, SocketAddr},
+    pin::Pin,
     str::FromStr,
-    sync::{Arc, RwLock},
+    task::{Context, Poll},
 };
 
 use futures::{
@@ -15,14 +23,18 @@ use futures::{
     future::{self, Either},
     SinkExt, StreamExt,
 };
-use tokio1::{
-    net::{TcpListener, UdpSocket},
-    runtime::Runtime,
-};
+use tokio1::runtime::Runtime;
 
 use trust_dns_client::{
     op::{LowerQuery, Query},
     rr::{LowerName, RecordType},
+};
+use trust_dns_resolver::{
+    config::{NameServerConfig, Protocol, ResolverConfig, ResolverOpts},
+    error::ResolveError,
+    lookup::Lookup,
+    name_server::{self, GenericConnection, GenericConnectionProvider, TokioHandle},
+    AsyncResolver, ConnectionProvider,
 };
 use trust_dns_server::{
     authority::{
@@ -71,14 +83,17 @@ pub fn run_resolver(
 
 struct FilteringResolver {
     allowed_zones: Vec<LowerName>,
-    forwarder_config: ForwardConfig,
+    resolver_config: ResolverConfig,
+    resolver: Resolver,
     rx: mpsc::Receiver<ResolverMessage>,
     filtering_state: FilteringState,
-    resolver: ForwardAuthority,
     command_sender: mpsc::Sender<(Vec<IpAddr>, oneshot::Sender<()>)>,
 }
 
-#[derive(Debug, PartialEq)]
+type CustomResolver = GenericConnectionProvider<RuntimeProvider>;
+type Resolver = AsyncResolver<GenericConnection, CustomResolver>;
+
+#[derive(Debug, PartialEq, Clone)]
 pub enum FilteringState {
     On,
     Off,
@@ -95,8 +110,11 @@ impl FilteringResolver {
         command_sender: mpsc::Sender<(Vec<IpAddr>, oneshot::Sender<()>)>,
     ) -> Result<(Self, mpsc::Sender<ResolverMessage>), String> {
         let (tx, rx) = mpsc::channel(0);
-        let forwarder_config = ForwardConfig {
-            name_servers: NameServerConfigGroup::from_ips_clear(
+
+        let resolver_config = ResolverConfig::from_parts(
+            None,
+            vec![],
+            NameServerConfigGroup::from_ips_clear(
                 &[
                     "192.168.3.1".parse().unwrap(),
                     "192.168.1.1".parse().unwrap(),
@@ -104,13 +122,14 @@ impl FilteringResolver {
                 53,
                 false,
             ),
-            options: None,
-        };
+        );
+        let resolver = AsyncResolver::new(
+            resolver_config.clone(),
+            ResolverOpts::default(),
+            TokioHandle,
+        )
+        .map_err(|err| format!("{}", err))?;
 
-        let resolver =
-            ForwardAuthority::try_from_config(Name::root(), ZoneType::Forward, &forwarder_config)
-                .await
-                .map_err(|err| format!(" {}", err))?;
 
         Ok((
             Self {
@@ -119,7 +138,7 @@ impl FilteringResolver {
                     LowerName::from(Name::from_str("apple.com").unwrap()),
                     LowerName::from(Name::from_str("www.apple.com").unwrap()),
                 ],
-                forwarder_config,
+                resolver_config,
                 resolver,
                 filtering_state: FilteringState::On,
                 rx,
@@ -141,14 +160,23 @@ impl FilteringResolver {
                     let _ = tx.send(());
                 }
                 SetResolverIps(resolvers, tx) => {
-                    let forwarder_config = ForwardConfig {
-                        name_servers: NameServerConfigGroup::from_ips_clear(&resolvers, 53, false),
-                        options: None,
-                    };
-                    match ForwardAuthority::try_from_config(Name::root(), ZoneType::Forward, &forwarder_config).await {
+                    let resolver_config = ResolverConfig::from_parts(
+                        None,
+                        vec![],
+                        NameServerConfigGroup::from_ips_clear(&resolvers, 53, false),
+                    );
+                    match AsyncResolver::new(
+                        resolver_config.clone(),
+                        ResolverOpts::default(),
+                        TokioHandle,
+                    ) {
                         Ok(resolver) => {
-                            self.forwarder_config = forwarder_config;
+                            log::debug!("Using new resolver config: {:?}", resolver_config);
+                            self.resolver_config = resolver_config;
                             self.resolver = resolver;
+                        }
+                        Err(err) => {
+                            log::error!("Failed to apply new resolver config: {}", err);
                         }
                     };
                     let _ = tx.send(());
@@ -173,11 +201,13 @@ impl FilteringResolver {
         let mut unblock_tx = self.command_sender.clone();
         let lookup = self
             .resolver
-            .search(&query, false, SupportedAlgorithms::new());
+            .lookup(query.name().clone(), RecordType::A, Default::default());
+        let filtering_state = self.filtering_state.clone();
         Either::Right(async move {
             match lookup.await {
                 Ok(result) => {
-                    let ip_records = result
+                    let lookup = ForwardLookup(result);
+                    let ip_records = lookup
                         .iter()
                         .filter_map(|record| match record.rdata() {
                             RData::A(ipv4) => Some(IpAddr::from(*ipv4)),
@@ -187,7 +217,7 @@ impl FilteringResolver {
                         .collect::<Vec<_>>();
                     if !ip_records.is_empty() {
                         log::error!("Successfully resolved {:?} to {:?}", query, ip_records);
-                        if self.filtering_state == FilteringState::On {
+                        if filtering_state == FilteringState::On {
                             let (done_tx, done_rx) = oneshot::channel();
                             if unblock_tx.send((ip_records, done_tx)).await.is_ok() {
                                 let _ = done_rx.await;
@@ -196,7 +226,7 @@ impl FilteringResolver {
                             }
                         }
                     }
-                    if tx.send(Box::new(result)).is_err() {
+                    if tx.send(Box::new(lookup)).is_err() {
                         log::error!("Failed to send response to resolver");
                     }
                 }
@@ -320,10 +350,10 @@ async fn run_resolver_inner(
     let (resolver, handle) = FilteringResolver::new(command_sender).await?;
     let resolver_handle = ResolverImpl { tx: handle.clone() };
     let mut server_future = ServerFuture::new(resolver_handle);
-    let udp_sock = UdpSocket::bind("0.0.0.0:53")
+    let udp_sock = tokio1::net::UdpSocket::bind("0.0.0.0:53")
         .await
         .map_err(|err| format!("{}", err))?;
-    let tcp_sock = TcpListener::bind("0.0.0.0:53")
+    let tcp_sock = tokio1::net::TcpListener::bind("0.0.0.0:53")
         .await
         .map_err(|err| format!("{}", err))?;
     server_future.register_socket(udp_sock);
@@ -338,4 +368,153 @@ async fn run_resolver_inner(
         .block_until_done()
         .await
         .map_err(|err| format!("{}", err))
+}
+
+#[derive(Clone)]
+struct SocketBinder {}
+
+#[derive(Clone)]
+struct RuntimeProvider {}
+
+impl name_server::RuntimeProvider for RuntimeProvider {
+    type Handle = TokioHandle;
+    type Timer = TokioTime;
+    type Udp = OwnSock;
+    type Tcp = OwnTcpSock;
+}
+
+struct OwnSock {
+    socket: tokio1::net::UdpSocket,
+}
+
+#[async_trait::async_trait]
+impl UdpSocket for OwnSock {
+    type Time = TokioTime;
+
+    async fn bind(addr: SocketAddr) -> io::Result<Self> {
+        let socket = tokio1::net::UdpSocket::bind(addr).await?;
+        Ok(OwnSock { socket })
+    }
+
+    fn poll_recv_from(
+        &self,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<io::Result<(usize, SocketAddr)>> {
+        let mut buf = tokio1::io::ReadBuf::new(buf);
+        let addr = futures::ready!(tokio1::net::UdpSocket::poll_recv_from(
+            &self.socket,
+            cx,
+            &mut buf
+        ))?;
+        let len = buf.filled().len();
+
+        Poll::Ready(Ok((len, addr)))
+    }
+
+    fn poll_send_to(
+        &self,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+        target: SocketAddr,
+    ) -> Poll<io::Result<usize>> {
+        tokio1::net::UdpSocket::poll_send_to(&self.socket, cx, buf, target)
+    }
+}
+
+
+struct OwnTcpSock {
+    socket: tokio1::net::TcpStream,
+}
+
+
+use tokio1::io::AsyncRead;
+impl futures::io::AsyncRead for OwnTcpSock {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<io::Result<usize>> {
+        let mut read_buf = tokio1::io::ReadBuf::new(buf);
+        futures::ready!(Pin::new(&mut self.socket).poll_read(cx, &mut read_buf))?;
+        Poll::Ready(Ok(read_buf.filled().len()))
+    }
+}
+
+use tokio1::io::AsyncWrite;
+impl tokio1::io::AsyncWrite for OwnTcpSock {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, io::Error>> {
+        Pin::new(&mut self.socket).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.socket).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.socket).poll_shutdown(cx)
+    }
+}
+
+impl futures::io::AsyncWrite for OwnTcpSock {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, io::Error>> {
+        Pin::new(&mut self.socket).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.socket).poll_flush(cx)
+    }
+
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.socket).poll_shutdown(cx)
+    }
+}
+
+impl tokio1::io::AsyncRead for OwnTcpSock {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut tokio1::io::ReadBuf<'_>,
+    ) -> Poll<Result<(), io::Error>> {
+        Pin::new(&mut self.socket).poll_read(cx, buf)
+    }
+}
+
+impl DnsTcpStream for OwnTcpSock {
+    type Time = TokioTime;
+}
+
+#[async_trait::async_trait]
+impl Connect for OwnTcpSock {
+    async fn connect(addr: SocketAddr) -> io::Result<Self> {
+        Ok(Self {
+            socket: tokio1::net::TcpStream::connect(addr).await?,
+        })
+    }
+}
+
+pub struct ForwardLookup(Lookup);
+
+/// This trait has to be reimplemented for the Lookup so that it can be sent back to the
+/// RequestHandler implementation.
+impl LookupObject for ForwardLookup {
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn iter<'a>(&'a self) -> Box<dyn Iterator<Item = &'a Record> + Send + 'a> {
+        Box::new(self.0.record_iter())
+    }
+
+    fn take_additionals(&mut self) -> Option<Box<dyn LookupObject>> {
+        None
+    }
 }
