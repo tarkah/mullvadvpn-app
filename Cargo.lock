@@ -941,7 +941,7 @@ dependencies = [
  "httpdate",
  "itoa",
  "pin-project 1.0.5",
- "socket2",
+ "socket2 0.3.19",
  "tokio 0.2.25",
  "tower-service",
  "tracing",
@@ -1052,7 +1052,7 @@ version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f7e2f18aece9709094573a9f24f483c4f65caa4298e2f7ae1b71cc65d853fad7"
 dependencies = [
- "socket2",
+ "socket2 0.3.19",
  "widestring",
  "winapi 0.3.9",
  "winreg 0.6.2",
@@ -1174,9 +1174,9 @@ checksum = "830d08ce1d1d941e6b30645f1a0eb5643013d835ce3779a5fc208261dbe10f55"
 
 [[package]]
 name = "libc"
-version = "0.2.93"
+version = "0.2.97"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9385f66bf6105b241aa65a61cb923ef20efc665cb9f9bb50ac2f0c4b7f378d41"
+checksum = "12b8adadd720df158f4d70dfe7ccc6adb0472d7c55ca83445f6a5ab3e36f8fb6"
 
 [[package]]
 name = "libdbus-sys"
@@ -1342,7 +1342,7 @@ version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5a33c1b55807fbed163481b5ba66db4b2fa6cde694a5027be10fb724206c5897"
 dependencies = [
- "socket2",
+ "socket2 0.3.19",
  "winapi 0.3.9",
 ]
 
@@ -1394,6 +1394,7 @@ name = "mullvad-daemon"
 version = "2021.4.0-beta1"
 dependencies = [
  "android_logger",
+ "async-trait",
  "cfg-if 1.0.0",
  "chrono",
  "clap",
@@ -1419,6 +1420,7 @@ dependencies = [
  "serde",
  "serde_json",
  "simple-signal",
+ "socket2 0.4.0",
  "talpid-core",
  "talpid-platform-metadata",
  "talpid-types",
@@ -1537,7 +1539,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
- "socket2",
+ "socket2 0.3.19",
  "talpid-types",
  "tempfile",
  "tokio 0.2.25",
@@ -2576,6 +2578,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "socket2"
+version = "0.4.0"
+source = "git+https://github.com/rust-lang/socket2?rev=f7023b4c810eb7b0fedf23a1752461c41765c797#f7023b4c810eb7b0fedf23a1752461c41765c797"
+dependencies = [
+ "libc",
+ "winapi 0.3.9",
+]
+
+[[package]]
 name = "spin"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2709,7 +2720,7 @@ dependencies = [
  "resolv-conf",
  "rtnetlink",
  "shell-escape",
- "socket2",
+ "socket2 0.3.19",
  "system-configuration",
  "talpid-dbus",
  "talpid-platform-metadata",
