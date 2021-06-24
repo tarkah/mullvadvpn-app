@@ -2,10 +2,6 @@
 use ipnetwork::{IpNetwork, Ipv4Network, Ipv6Network};
 #[cfg(unix)]
 use lazy_static::lazy_static;
-use std::fmt;
-use std::{collections::BTreeSet, net::IpAddr};
-#[cfg(windows)]
-use std::net::IpAddr;
 #[cfg(unix)]
 use std::net::{Ipv4Addr, Ipv6Addr};
 #[cfg(windows)]

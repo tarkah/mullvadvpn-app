@@ -290,10 +290,8 @@ impl ConnectingState {
                         Err(error) => self.disconnect(
                             shared_values,
                             AfterDisconnect::Block(ErrorStateCause::SetFirewallPolicyError(error)),
-                        ),
+                        )
                     }
-                    let next_state = self.reset_firewall(shared_values);
-                    return next_state;
                 }
             }
             Some(TunnelCommand::AllowEndpoint(endpoint, tx)) => {
