@@ -18,6 +18,13 @@ use std::{
     task::{Context, Poll},
 };
 
+#[cfg(target_os = "macos")]
+use std::{
+    net,
+    num::NonZeroU32,
+    os::unix::io::{FromRawFd, IntoRawFd, RawFd},
+};
+
 use futures::{
     channel::{mpsc, oneshot},
     future::{self, Either},
@@ -34,7 +41,7 @@ use trust_dns_resolver::{
     error::ResolveError,
     lookup::Lookup,
     name_server::{self, GenericConnection, GenericConnectionProvider, TokioHandle},
-    AsyncResolver, ConnectionProvider,
+    AsyncResolver, ConnectionProvider, TokioAsyncResolver,
 };
 use trust_dns_server::{
     authority::{
@@ -84,14 +91,16 @@ pub fn run_resolver(
 struct FilteringResolver {
     allowed_zones: Vec<LowerName>,
     resolver_config: ResolverConfig,
-    resolver: Resolver,
+    regular_resolver: RegularUpstreamResolver,
+    excluded_resolver: ExcludedUpstreamResolver,
     rx: mpsc::Receiver<ResolverMessage>,
     filtering_state: FilteringState,
     command_sender: mpsc::Sender<(Vec<IpAddr>, oneshot::Sender<()>)>,
 }
 
-type CustomResolver = GenericConnectionProvider<RuntimeProvider>;
-type Resolver = AsyncResolver<GenericConnection, CustomResolver>;
+type OurConnectionProvider = GenericConnectionProvider<RuntimeProvider>;
+type ExcludedUpstreamResolver = AsyncResolver<GenericConnection, OurConnectionProvider>;
+type RegularUpstreamResolver = TokioAsyncResolver;
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum FilteringState {
@@ -114,22 +123,17 @@ impl FilteringResolver {
         let resolver_config = ResolverConfig::from_parts(
             None,
             vec![],
-            NameServerConfigGroup::from_ips_clear(
-                &[
-                    "192.168.3.1".parse().unwrap(),
-                    "192.168.1.1".parse().unwrap(),
-                ],
-                53,
-                false,
-            ),
+            NameServerConfigGroup::from_ips_clear(&["193.138.218.74".parse().unwrap()], 53, false),
         );
-        let resolver = AsyncResolver::new(
+        let excluded_resolver = ExcludedUpstreamResolver::new(
             resolver_config.clone(),
             ResolverOpts::default(),
             TokioHandle,
         )
         .map_err(|err| format!("{}", err))?;
-
+        let regular_resolver =
+            RegularUpstreamResolver::tokio(resolver_config.clone(), ResolverOpts::default())
+                .map_err(|err| format!("{}", err))?;
 
         Ok((
             Self {
@@ -139,7 +143,8 @@ impl FilteringResolver {
                     LowerName::from(Name::from_str("www.apple.com").unwrap()),
                 ],
                 resolver_config,
-                resolver,
+                excluded_resolver,
+                regular_resolver,
                 filtering_state: FilteringState::On,
                 rx,
                 command_sender,
@@ -173,7 +178,7 @@ impl FilteringResolver {
                         Ok(resolver) => {
                             log::debug!("Using new resolver config: {:?}", resolver_config);
                             self.resolver_config = resolver_config;
-                            self.resolver = resolver;
+                            self.excluded_resolver = resolver;
                         }
                         Err(err) => {
                             log::error!("Failed to apply new resolver config: {}", err);
@@ -192,16 +197,27 @@ impl FilteringResolver {
     ) -> impl Future<Output = ()> {
         let empty_response = Box::new(EmptyLookup) as Box<dyn LookupObject>;
         if !self.should_block_request(&query) {
-            log::error!("Blocking query {}", query);
+            log::debug!("Blocking query {}", query);
             let _ = tx.send(empty_response);
             return Either::Left(async {});
         }
 
-        log::error!("Will try to resolve {}", query);
+        log::debug!("Will try to resolve {}", query);
         let mut unblock_tx = self.command_sender.clone();
-        let lookup = self
-            .resolver
-            .lookup(query.name().clone(), RecordType::A, Default::default());
+        let lookup: Box<dyn Future<Output = Result<Lookup, ResolveError>> + Unpin + Send> =
+            if self.filtering_state == FilteringState::On {
+                Box::new(self.excluded_resolver.lookup(
+                    query.name().clone(),
+                    RecordType::A,
+                    Default::default(),
+                ))
+            } else {
+                Box::new(self.regular_resolver.lookup(
+                    query.name().clone(),
+                    RecordType::A,
+                    Default::default(),
+                ))
+            };
         let filtering_state = self.filtering_state.clone();
         Either::Right(async move {
             match lookup.await {
@@ -314,11 +330,6 @@ impl RequestHandler for ResolverImpl {
         request: Request,
         mut response_handle: RT,
     ) -> Self::ResponseFuture {
-        log::error!(
-            "received a new request: {:?} from {:?}",
-            request.message,
-            request.src
-        );
         if !request.src.ip().is_loopback() {
             log::error!("Dropping a stray request from outside: {}", request.src);
             return Box::pin(async {});
@@ -383,8 +394,44 @@ impl name_server::RuntimeProvider for RuntimeProvider {
     type Tcp = OwnTcpSock;
 }
 
+#[derive(Debug)]
 struct OwnSock {
     socket: tokio1::net::UdpSocket,
+}
+
+impl OwnSock {
+    #[cfg(target_os = "macos")]
+    async fn inner_bind(addr: SocketAddr) -> io::Result<Self> {
+        use socket2::{Domain, Protocol, Socket, Type};
+        let raw_fd: RawFd = tokio1::task::spawn_blocking(move || -> io::Result<RawFd> {
+            let socket = Socket::new(Domain::for_address(addr), Type::DGRAM, Some(Protocol::UDP))?;
+            socket.set_nonblocking(true)?;
+            match best_interface() {
+                Some(iface_index) => {
+                    if let Err(err) =  socket.bind_device_by_index(Some(iface_index)) {
+                        log::error!("FAILED TO BIND SOCKET TO DEVICE: {}", err);
+                        return Err(err);
+                    }
+                },
+                None => {
+                    log::error!("FAILED TO GET INTERFACE INDEX");
+                },
+            };
+            Ok(socket.into_raw_fd())
+        })
+        .await??;
+        let std_socket = unsafe { net::UdpSocket::from_raw_fd(raw_fd) };
+        let socket = tokio1::net::UdpSocket::from_std(std_socket)?;
+        Ok(OwnSock { socket })
+    }
+
+
+}
+
+#[cfg(target_os = "macos")]
+fn best_interface() -> Option<NonZeroU32> {
+    let best_interface = b"en0\0";
+    NonZeroU32::new(unsafe { libc::if_nametoindex(best_interface.as_ptr() as *const _) })
 }
 
 #[async_trait::async_trait]
@@ -392,8 +439,17 @@ impl UdpSocket for OwnSock {
     type Time = TokioTime;
 
     async fn bind(addr: SocketAddr) -> io::Result<Self> {
-        let socket = tokio1::net::UdpSocket::bind(addr).await?;
-        Ok(OwnSock { socket })
+        #[cfg(target_os = "macos")]
+        {
+            let result = Self::inner_bind(addr).await;
+            log::trace!("bind result: {:?}", result);
+            result
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let socket = tokio1::net::UdpSocket::bind(addr).await?;
+            Ok(OwnSock { socket })
+        }
     }
 
     fn poll_recv_from(
@@ -422,11 +478,9 @@ impl UdpSocket for OwnSock {
     }
 }
 
-
 struct OwnTcpSock {
-    socket: tokio1::net::TcpStream,
+    stream: tokio1::net::TcpStream,
 }
-
 
 use tokio1::io::AsyncRead;
 impl futures::io::AsyncRead for OwnTcpSock {
@@ -436,7 +490,7 @@ impl futures::io::AsyncRead for OwnTcpSock {
         buf: &mut [u8],
     ) -> Poll<io::Result<usize>> {
         let mut read_buf = tokio1::io::ReadBuf::new(buf);
-        futures::ready!(Pin::new(&mut self.socket).poll_read(cx, &mut read_buf))?;
+        futures::ready!(Pin::new(&mut self.stream).poll_read(cx, &mut read_buf))?;
         Poll::Ready(Ok(read_buf.filled().len()))
     }
 }
@@ -448,15 +502,15 @@ impl tokio1::io::AsyncWrite for OwnTcpSock {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<Result<usize, io::Error>> {
-        Pin::new(&mut self.socket).poll_write(cx, buf)
+        Pin::new(&mut self.stream).poll_write(cx, buf)
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.socket).poll_flush(cx)
+        Pin::new(&mut self.stream).poll_flush(cx)
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.socket).poll_shutdown(cx)
+        Pin::new(&mut self.stream).poll_shutdown(cx)
     }
 }
 
@@ -466,15 +520,15 @@ impl futures::io::AsyncWrite for OwnTcpSock {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<Result<usize, io::Error>> {
-        Pin::new(&mut self.socket).poll_write(cx, buf)
+        Pin::new(&mut self.stream).poll_write(cx, buf)
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.socket).poll_flush(cx)
+        Pin::new(&mut self.stream).poll_flush(cx)
     }
 
     fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.socket).poll_shutdown(cx)
+        Pin::new(&mut self.stream).poll_shutdown(cx)
     }
 }
 
@@ -484,7 +538,7 @@ impl tokio1::io::AsyncRead for OwnTcpSock {
         cx: &mut Context<'_>,
         buf: &mut tokio1::io::ReadBuf<'_>,
     ) -> Poll<Result<(), io::Error>> {
-        Pin::new(&mut self.socket).poll_read(cx, buf)
+        Pin::new(&mut self.stream).poll_read(cx, buf)
     }
 }
 
@@ -492,11 +546,40 @@ impl DnsTcpStream for OwnTcpSock {
     type Time = TokioTime;
 }
 
+impl OwnTcpSock {
+    #[cfg(target_os = "macos")]
+    async fn inner_bind(addr: SocketAddr) -> io::Result<Self> {
+        use socket2::{Domain, Protocol, Socket, Type};
+        let raw_fd: RawFd = tokio1::task::spawn_blocking(move || -> io::Result<RawFd> {
+            let socket = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
+            socket.set_nonblocking(true)?;
+            match best_interface() {
+                Some(iface_index) => {
+                    if let Err(err) =  socket.bind_device_by_index(Some(iface_index)) {
+                        log::error!("FAILED TO BIND SOCKET TO DEVICE: {}", err);
+                        return Err(err);
+                    }
+                },
+                None => {
+                    log::error!("FAILED TO GET INTERFACE INDEX");
+                },
+            };
+            Ok(socket.into_raw_fd())
+        })
+        .await??;
+        let socket = unsafe { tokio1::net::TcpSocket::from_raw_fd(raw_fd) };
+        let stream = socket.connect(addr).await?;
+
+
+        Ok(Self { stream })
+    }
+}
+
 #[async_trait::async_trait]
 impl Connect for OwnTcpSock {
     async fn connect(addr: SocketAddr) -> io::Result<Self> {
         Ok(Self {
-            socket: tokio1::net::TcpStream::connect(addr).await?,
+            stream: tokio1::net::TcpStream::connect(addr).await?,
         })
     }
 }
