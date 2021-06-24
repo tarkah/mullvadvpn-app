@@ -2739,7 +2739,7 @@ dependencies = [
  "libc",
  "log",
  "talpid-types",
- "tokio",
+ "tokio 0.2.25",
 ]
 
 [[package]]
