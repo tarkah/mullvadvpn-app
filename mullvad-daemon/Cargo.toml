@@ -25,7 +25,7 @@ rand = "0.7"
 regex = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-socket2 = { git = "https://github.com/rust-lang/socket2", rev = "f7023b4c810eb7b0fedf23a1752461c41765c797" }
+socket2 = { git = "https://github.com/rust-lang/socket2", rev = "f7023b4c810eb7b0fedf23a1752461c41765c797", features = [ "all" ] }
 tokio = { version = "0.2", features =  [ "fs", "rt-threaded", "stream", "sync" ] }
 uuid = { version = "0.8", features = ["v4"] }
 trust-dns-resolver = "0.20.3"
