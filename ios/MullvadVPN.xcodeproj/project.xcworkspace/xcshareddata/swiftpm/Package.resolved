@@ -14,8 +14,8 @@
         "package": "wireguard-apple",
         "repositoryURL": "https://git.zx2c4.com/wireguard-apple",
         "state": {
-          "branch": null,
-          "revision": "c1f509d65bba1c00c6b6ef93826f658ff36a0761",
+          "branch": "am/enable-include-all-networks",
+          "revision": "79aeb0be0d0aa3f6c8bd24309aaa8dcf03216fb4",
           "version": null
         }
       }

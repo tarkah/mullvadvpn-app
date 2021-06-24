@@ -517,9 +517,7 @@ extension AppDelegate: ConnectViewControllerDelegate {
     }
 
     func connectViewControllerShouldReconnectTunnel(_ controller: ConnectViewController) {
-        TunnelManager.shared.reconnectTunnel {
-            self.logger?.debug("Re-connected VPN tunnel")
-        }
+        TunnelManager.shared.reconnectTunnel(completionHandler: nil)
     }
 
     @objc private func handleDismissSelectLocationController(_ sender: Any) {
@@ -529,11 +527,7 @@ extension AppDelegate: ConnectViewControllerDelegate {
     private func connectTunnel() {
         TunnelManager.shared.startTunnel { (result) in
             DispatchQueue.main.async {
-                switch result {
-                case .success:
-                    self.logger?.debug("Connected VPN tunnel")
-
-                case .failure(let error):
+                if case .failure(let error) = result {
                     self.logger?.error(chainedError: error, message: "Failed to start the VPN tunnel")
                     self.presentTunnelError(error, alertTitle: NSLocalizedString("Failed to start the VPN tunnel", comment: ""))
                 }
@@ -543,11 +537,7 @@ extension AppDelegate: ConnectViewControllerDelegate {
 
     private func disconnectTunnel() {
         TunnelManager.shared.stopTunnel { (result) in
-            switch result {
-            case .success:
-                self.logger?.debug("Disconnected VPN tunnel")
-
-            case .failure(let error):
+            if case .failure(let error) = result {
                 self.logger?.error(chainedError: error, message: "Failed to stop the VPN tunnel")
                 self.presentTunnelError(error, alertTitle: NSLocalizedString("Failed to stop the VPN tunnel", comment: ""))
             }

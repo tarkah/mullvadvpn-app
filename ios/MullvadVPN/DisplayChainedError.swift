@@ -52,6 +52,9 @@ extension TunnelManager.Error: DisplayChainedError {
         case .saveVPNConfiguration(let systemError):
             return String(format: NSLocalizedString("Failed to save a VPN tunnel configuration: %@", comment: ""), systemError.localizedDescription)
 
+        case .saveUpgradeVPNConfiguration(let systemError):
+            return String(format: NSLocalizedString("Failed to save upgraded VPN tunnel configuration: %@", comment: ""), systemError.localizedDescription)
+
         case .obtainPersistentKeychainReference(_):
             return NSLocalizedString("Failed to obtain the persistent keychain reference for the VPN configuration", comment: "")
 

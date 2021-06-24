@@ -153,6 +153,9 @@ class TunnelManager {
         /// A failure to save the system VPN configuration
         case saveVPNConfiguration(Swift.Error)
 
+        /// A failure to save the upgraded system VPN configuration
+        case saveUpgradeVPNConfiguration(Swift.Error)
+
         /// A failure to reload the system VPN configuration
         case reloadVPNConfiguration(Swift.Error)
 
@@ -203,6 +206,8 @@ class TunnelManager {
                 return "Failed to load the system VPN configurations"
             case .saveVPNConfiguration:
                 return "Failed to save the system VPN configuration"
+            case .saveUpgradeVPNConfiguration:
+                return "Failed to save the upgraded system VPN configuration"
             case .reloadVPNConfiguration:
                 return "Failed to reload the system VPN configuration"
             case .removeVPNConfiguration:
@@ -712,11 +717,19 @@ class TunnelManager {
 
             switch (verificationResult, tunnelSettingsResult) {
             case (.success(true), .success(let keychainEntry)):
-                self.accountToken = accountToken
-                self.tunnelSettings = keychainEntry.tunnelSettings
-                self.setTunnelProvider(tunnelProvider: tunnelProvider)
+                self.upgradeTunnelProtocolConfiguration(tunnel: tunnelProvider) { upgradeResult in
+                    switch upgradeResult {
+                    case .success:
+                        self.accountToken = accountToken
+                        self.tunnelSettings = keychainEntry.tunnelSettings
+                        self.setTunnelProvider(tunnelProvider: tunnelProvider)
 
-                completionHandler(.success(()))
+                        completionHandler(.success(()))
+
+                    case .failure(let error):
+                        completionHandler(.failure(error))
+                    }
+                }
 
             // Remove the tunnel when failed to verify it but successfuly loaded the tunnel
             // settings.
@@ -855,6 +868,28 @@ class TunnelManager {
 
         // Update the existing state
         updateTunnelState(connectionStatus: connection.status)
+    }
+ 
+    private func upgradeTunnelProtocolConfiguration(tunnel: TunnelProviderManagerType, completionHandler: @escaping (Result<(), TunnelManager.Error>) -> Void) {
+        if #available(iOS 15, *) {
+            if let protocolConfiguration = tunnel.protocolConfiguration,
+                (!protocolConfiguration.includeAllNetworks || !protocolConfiguration.excludeLocalNetworks)
+            {
+                self.logger.debug("Upgrade VPN configuration to enable includeAllNetworks")
+
+                Self.setRouteAllTrafficViaTunnel(protocolConfiguration: protocolConfiguration)
+
+                tunnel.saveToPreferences { error in
+                    self.dispatchQueue.async {
+                        completionHandler(error.flatMap { .failure(.saveUpgradeVPNConfiguration($0)) } ?? .success(()))
+                    }
+                }
+
+                return
+            }
+        }
+
+        completionHandler(.success(()))
     }
 
     private func unregisterConnectionObserver() {
@@ -1155,6 +1190,8 @@ class TunnelManager {
                 protocolConfig.username = accountToken
                 protocolConfig.passwordReference = passwordReference
 
+                Self.setRouteAllTrafficViaTunnel(protocolConfiguration: protocolConfig)
+
                 tunnelProvider.isEnabled = true
                 tunnelProvider.localizedDescription = "WireGuard"
                 tunnelProvider.protocolConfiguration = protocolConfig
@@ -1168,6 +1205,13 @@ class TunnelManager {
                 return tunnelProvider
         }.mapError { (error) -> Error in
             return .obtainPersistentKeychainReference(error)
+        }
+    }
+
+    private class func setRouteAllTrafficViaTunnel(protocolConfiguration: NEVPNProtocol) {
+        if #available(iOS 15.0, *) {
+            protocolConfiguration.includeAllNetworks = true
+            protocolConfiguration.excludeLocalNetworks = true
         }
     }
 
