@@ -4,7 +4,7 @@ use crate::{
 };
 use futures::{
     channel::{mpsc, oneshot},
-    future::{abortable, AbortHandle, Aborted},
+    future::{abortable, AbortHandle},
     sink::SinkExt,
     stream::StreamExt,
     TryFutureExt,
@@ -23,7 +23,7 @@ use std::{
     time::{Duration, Instant},
 };
 use talpid_types::ErrorExt;
-use tokio::runtime::Handle;
+use tokio::{runtime::Handle, sync::broadcast};
 
 pub use hyper::StatusCode;
 
@@ -43,7 +43,7 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 #[derive(err_derive::Error, Debug)]
 pub enum Error {
     #[error(display = "Request cancelled")]
-    Aborted(Aborted),
+    Aborted,
 
     #[error(display = "Request service is suspended")]
     Suspended,
@@ -88,6 +88,7 @@ pub(crate) struct RequestService {
     handle: Handle,
     next_id: u64,
     in_flight_requests: BTreeMap<u64, AbortHandle>,
+    defer_request_tx: broadcast::Sender<bool>,
     address_cache: AddressCache,
     suspended: bool,
 }
@@ -105,6 +106,7 @@ impl RequestService {
         connector.set_service_tx(command_tx.clone());
         let client = Client::builder().build(connector);
 
+        let (defer_request_tx, _) = broadcast::channel(10);
 
         Self {
             command_tx,
@@ -112,6 +114,7 @@ impl RequestService {
             sockets: BTreeMap::new(),
             client,
             in_flight_requests: BTreeMap::new(),
+            defer_request_tx,
             next_id: 0,
             handle,
             address_cache,
@@ -127,18 +130,40 @@ impl RequestService {
         }
     }
 
-    fn process_command(&mut self, command: RequestCommand) {
+    async fn process_command(&mut self, command: RequestCommand) {
         match command {
-            RequestCommand::NewRequest(request, completion_tx) => {
+            RequestCommand::DeferRequest(request, completion_tx) => {
                 if self.suspended {
-                    if completion_tx.send(Err(Error::Suspended)).is_err() {
-                        log::trace!(
-                            "Failed to send response to caller, caller channel is shut down"
-                        );
-                    }
-                    return;
+                    let mut rx = self.defer_request_tx.subscribe();
+                    let mut cmd_tx = self.command_tx.clone();
+                    self.handle.spawn(async move {
+                        match rx.recv().await {
+                            Ok(true) => (),
+                            Ok(false) => {
+                                if completion_tx.send(Err(Error::Aborted)).is_err() {
+                                    log::trace!(
+                                        "Failed to send response to caller, caller channel is shut down"
+                                    );
+                                }
+                                return;
+                            }
+                            Err(error) => {
+                                log::error!("Failed to receive broadcast: {}", error.display_chain());
+                                return;
+                            }
+                        }
+                        if cmd_tx.send(RequestCommand::NewRequest(request, completion_tx)).await.is_err() {
+                            log::error!("Command channel is closed");
+                        }
+                    });
+                } else {
+                    let _ = self
+                        .command_tx
+                        .send(RequestCommand::NewRequest(request, completion_tx))
+                        .await;
                 }
-
+            }
+            RequestCommand::NewRequest(request, completion_tx) => {
                 let id = self.id();
                 let mut tx = self.command_tx.clone();
                 let timeout = request.timeout();
@@ -153,7 +178,7 @@ impl RequestService {
 
                 let future = async move {
                     let response =
-                        tokio::time::timeout(timeout, request_future.map_err(Error::Aborted))
+                        tokio::time::timeout(timeout, request_future.map_err(|_| Error::Aborted))
                             .await
                             .map_err(Error::TimeoutError);
 
@@ -226,6 +251,7 @@ impl RequestService {
             RequestCommand::Resume => {
                 if self.suspended {
                     self.suspended = false;
+                    let _ = self.defer_request_tx.send(true);
                     log::debug!("Resuming REST requests");
                 }
             }
@@ -233,6 +259,8 @@ impl RequestService {
     }
 
     fn reset(&mut self) {
+        let _ = self.defer_request_tx.send(false);
+
         let old_requests = mem::replace(&mut self.in_flight_requests, BTreeMap::new());
         for (_, abort_handle) in old_requests.into_iter() {
             abort_handle.abort();
@@ -254,7 +282,7 @@ impl RequestService {
 
     pub async fn into_future(mut self) {
         while let Some(command) = self.command_rx.next().await {
-            self.process_command(command);
+            self.process_command(command).await;
         }
         self.reset();
     }
@@ -294,7 +322,7 @@ impl RequestServiceHandle {
     pub async fn request(&self, request: RestRequest) -> Result<Response> {
         let (completion_tx, completion_rx) = oneshot::channel();
         let mut tx = self.tx.clone();
-        tx.send(RequestCommand::NewRequest(request, completion_tx))
+        tx.send(RequestCommand::DeferRequest(request, completion_tx))
             .await
             .map_err(|_| Error::SendError)?;
 
@@ -324,6 +352,10 @@ impl RequestServiceHandle {
 
 #[derive(Debug)]
 pub(crate) enum RequestCommand {
+    DeferRequest(
+        RestRequest,
+        oneshot::Sender<std::result::Result<Response, Error>>,
+    ),
     NewRequest(
         RestRequest,
         oneshot::Sender<std::result::Result<Response, Error>>,
