@@ -136,10 +136,11 @@ impl RequestService {
                 if self.suspended {
                     let mut rx = self.defer_request_tx.subscribe();
                     let mut cmd_tx = self.command_tx.clone();
+                    let timeout = request.timeout();
                     self.handle.spawn(async move {
-                        match rx.recv().await {
-                            Ok(true) => (),
-                            Ok(false) => {
+                        match tokio::time::timeout(timeout, rx.recv()).await {
+                            Ok(Ok(true)) => (),
+                            Ok(Ok(false)) => {
                                 if completion_tx.send(Err(Error::Aborted)).is_err() {
                                     log::trace!(
                                         "Failed to send response to caller, caller channel is shut down"
@@ -147,8 +148,16 @@ impl RequestService {
                                 }
                                 return;
                             }
-                            Err(error) => {
+                            Ok(Err(error)) => {
                                 log::error!("Failed to receive broadcast: {}", error.display_chain());
+                                return;
+                            }
+                            Err(elapsed) => {
+                                if completion_tx.send(Err(Error::TimeoutError(elapsed))).is_err() {
+                                    log::trace!(
+                                        "Failed to send response to caller, caller channel is shut down"
+                                    );
+                                }
                                 return;
                             }
                         }
