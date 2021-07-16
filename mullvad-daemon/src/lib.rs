@@ -568,7 +568,28 @@ where
         )
         .await
         .map_err(Error::InitRpcFactory)?;
-        let rpc_handle = rpc_runtime.mullvad_rest_handle_suspended();
+
+        let mut settings = SettingsPersister::load(&settings_dir).await;
+
+        let rpc_handle = rpc_runtime.mullvad_rest_handle();
+        let accounts_proxy = AccountsProxy::new(rpc_handle.clone());
+
+        let valid_account = if let Some(token) = settings.get_account_token() {
+            if let Ok(expiry) = accounts_proxy.get_expiry(token).await {
+                if expiry >= chrono::Utc::now() {
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if !valid_account {
+            rpc_handle.service().suspend().await;
+        }
 
         let relay_list_listener = event_listener.clone();
         let on_relay_list_update = move |relay_list: &RelayList| {
@@ -582,8 +603,6 @@ where
             &cache_dir,
         );
 
-
-        let mut settings = SettingsPersister::load(&settings_dir).await;
 
         if version::is_beta_version() {
             let _ = settings.set_show_beta_releases(true).await;
@@ -717,7 +736,7 @@ where
             settings,
             account_history,
             rpc_runtime,
-            accounts_proxy: AccountsProxy::new(rpc_handle.clone()),
+            accounts_proxy,
             rpc_handle,
             wireguard_key_manager,
             version_updater_handle,
@@ -883,6 +902,7 @@ where
         &mut self,
         tunnel_state_transition: TunnelStateTransition,
     ) {
+        self.rpc_handle.service().resume().await;
         self.reset_rpc_sockets_on_tunnel_state_transition(&tunnel_state_transition)
             .await;
         let tunnel_state = match tunnel_state_transition {
@@ -1143,6 +1163,7 @@ where
             log::trace!("Dropping daemon command because the daemon is shutting down",);
             return;
         }
+        self.rpc_handle.service().resume().await;
         match command {
             SetTargetState(tx, state) => self.on_set_target_state(tx, state).await,
             Reconnect(tx) => self.on_reconnect(tx),

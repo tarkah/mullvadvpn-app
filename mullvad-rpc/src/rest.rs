@@ -211,10 +211,23 @@ impl RequestService {
             RequestCommand::RequestFinished(id) => {
                 self.in_flight_requests.remove(&id);
             }
-
             RequestCommand::Reset(tx) => {
                 self.reset();
                 let _ = tx.send(());
+            }
+            RequestCommand::Suspend(tx) => {
+                if !self.suspended {
+                    log::debug!("Suspending REST requests");
+                    self.suspended = true;
+                    self.reset();
+                }
+                let _ = tx.send(());
+            }
+            RequestCommand::Resume => {
+                if self.suspended {
+                    self.suspended = false;
+                    log::debug!("Resuming REST requests");
+                }
             }
         }
     }
@@ -293,6 +306,20 @@ impl RequestServiceHandle {
     pub fn spawn<T: Send + 'static>(&self, future: impl Future<Output = T> + Send + 'static) {
         let _ = self.handle.spawn(future);
     }
+
+    /// Drop all future and in-flight requests.
+    pub async fn suspend(&self) {
+        let mut tx = self.tx.clone();
+        let (completion_tx, completion_rx) = oneshot::channel();
+        let _ = tx.send(RequestCommand::Suspend(completion_tx)).await;
+        let _ = completion_rx.await;
+    }
+
+    /// Stop dropping requests.
+    pub async fn resume(&self) {
+        let mut tx = self.tx.clone();
+        let _ = tx.send(RequestCommand::Resume).await;
+    }
 }
 
 #[derive(Debug)]
@@ -305,6 +332,8 @@ pub(crate) enum RequestCommand {
     SocketOpened(usize, TcpStreamHandle),
     SocketClosed(usize),
     Reset(oneshot::Sender<()>),
+    Suspend(oneshot::Sender<()>),
+    Resume,
 }
 
 
