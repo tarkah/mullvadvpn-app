@@ -145,7 +145,11 @@ impl MullvadRpcRuntime {
     }
 
     /// Creates a new request service and returns a handle to it.
-    fn new_request_service(&mut self, sni_hostname: Option<String>) -> rest::RequestServiceHandle {
+    fn new_request_service(
+        &mut self,
+        sni_hostname: Option<String>,
+        suspend: bool,
+    ) -> rest::RequestServiceHandle {
         let https_connector = HttpsConnectorWithSni::new(
             self.handle.clone(),
             sni_hostname,
@@ -157,6 +161,7 @@ impl MullvadRpcRuntime {
             https_connector,
             self.handle.clone(),
             self.address_cache.clone(),
+            suspend,
         );
         let handle = service.handle();
         self.handle.spawn(service.into_future());
@@ -165,19 +170,26 @@ impl MullvadRpcRuntime {
 
     /// Returns a request factory initialized to create requests for the master API
     pub fn mullvad_rest_handle(&mut self) -> rest::MullvadRestHandle {
-        let service = self.new_request_service(Some(API_HOST.to_owned()));
+        self.mullvad_rest_handle_inner(false)
+    }
+
+    pub fn mullvad_rest_handle_suspended(&mut self) -> rest::MullvadRestHandle {
+        self.mullvad_rest_handle_inner(true)
+    }
+
+    fn mullvad_rest_handle_inner(&mut self, suspend: bool) -> rest::MullvadRestHandle {
+        let service = self.new_request_service(Some(API_HOST.to_owned()), suspend);
         let factory = rest::RequestFactory::new(
             API_HOST.to_owned(),
             Box::new(self.address_cache.clone()),
             Some("app".to_owned()),
         );
-
         rest::MullvadRestHandle::new(service, factory, self.address_cache.clone())
     }
 
     /// Returns a new request service handle
     pub fn rest_handle(&mut self) -> rest::RequestServiceHandle {
-        self.new_request_service(None)
+        self.new_request_service(None, false)
     }
 
     pub fn handle(&mut self) -> &mut tokio::runtime::Handle {

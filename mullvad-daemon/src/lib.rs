@@ -568,7 +568,7 @@ where
         )
         .await
         .map_err(Error::InitRpcFactory)?;
-        let rpc_handle = rpc_runtime.mullvad_rest_handle();
+        let rpc_handle = rpc_runtime.mullvad_rest_handle_suspended();
 
         let relay_list_listener = event_listener.clone();
         let on_relay_list_update = move |relay_list: &RelayList| {

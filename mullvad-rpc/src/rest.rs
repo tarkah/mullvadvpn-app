@@ -45,6 +45,9 @@ pub enum Error {
     #[error(display = "Request cancelled")]
     Aborted(Aborted),
 
+    #[error(display = "Request service is suspended")]
+    Suspended,
+
     #[error(display = "Hyper error")]
     HyperError(#[error(source)] hyper::Error),
 
@@ -86,6 +89,7 @@ pub(crate) struct RequestService {
     next_id: u64,
     in_flight_requests: BTreeMap<u64, AbortHandle>,
     address_cache: AddressCache,
+    suspended: bool,
 }
 
 impl RequestService {
@@ -94,6 +98,7 @@ impl RequestService {
         mut connector: HttpsConnectorWithSni,
         handle: Handle,
         address_cache: AddressCache,
+        suspend: bool,
     ) -> RequestService {
         let (command_tx, command_rx) = mpsc::channel(1);
 
@@ -110,6 +115,7 @@ impl RequestService {
             next_id: 0,
             handle,
             address_cache,
+            suspended: suspend,
         }
     }
 
@@ -124,6 +130,15 @@ impl RequestService {
     fn process_command(&mut self, command: RequestCommand) {
         match command {
             RequestCommand::NewRequest(request, completion_tx) => {
+                if self.suspended {
+                    if completion_tx.send(Err(Error::Suspended)).is_err() {
+                        log::trace!(
+                            "Failed to send response to caller, caller channel is shut down"
+                        );
+                    }
+                    return;
+                }
+
                 let id = self.id();
                 let mut tx = self.command_tx.clone();
                 let timeout = request.timeout();
