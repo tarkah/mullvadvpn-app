@@ -113,6 +113,7 @@
 		585DA89726B0328000B8C587 /* PacketTunnelResponse.swift in Sources */ = {isa = PBXBuildFile; fileRef = 585DA89526B0328000B8C587 /* PacketTunnelResponse.swift */; };
 		585DA89926B0329200B8C587 /* TunnelConnectionInfo.swift in Sources */ = {isa = PBXBuildFile; fileRef = 585DA89826B0329200B8C587 /* TunnelConnectionInfo.swift */; };
 		585DA89A26B0329200B8C587 /* TunnelConnectionInfo.swift in Sources */ = {isa = PBXBuildFile; fileRef = 585DA89826B0329200B8C587 /* TunnelConnectionInfo.swift */; };
+		585DA89B26B146B300B8C587 /* PacketTunnelIpcHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 585DA88E26B031E200B8C587 /* PacketTunnelIpcHandler.swift */; };
 		585FE2F124E1365400439C50 /* LogStreamer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 585FE2F024E1365400439C50 /* LogStreamer.swift */; };
 		5862805422428EF100F5A6E1 /* TranslucentButtonBlurView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5862805322428EF100F5A6E1 /* TranslucentButtonBlurView.swift */; };
 		5868585524054096000B8131 /* AppButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5868585424054096000B8131 /* AppButton.swift */; };
@@ -1257,6 +1258,7 @@
 				587425C12299833500CA2045 /* RootContainerViewController.swift in Sources */,
 				580EE20124B321D500F9D8A1 /* OperationProtocol.swift in Sources */,
 				585DA87726B024A600B8C587 /* CachedRelays.swift in Sources */,
+				585DA89B26B146B300B8C587 /* PacketTunnelIpcHandler.swift in Sources */,
 				5896AE84246D5889005B36CB /* CustomDateComponentsFormatting.swift in Sources */,
 				580EE21824B3235100F9D8A1 /* AnyOperationObserver.swift in Sources */,
 				585DA89626B0328000B8C587 /* PacketTunnelResponse.swift in Sources */,
