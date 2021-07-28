@@ -77,10 +77,15 @@ class RelayCacheTracker {
     private let observerList = ObserverList<AnyRelayCacheObserver>()
 
     /// A shared instance of `RelayCache`
-    static let shared = RelayCacheTracker(
-        cacheFileURL: RelayCacheIO.defaultCacheFileURL(forSecurityApplicationGroupIdentifier: ApplicationConfiguration.securityGroupIdentifier)!,
-        prebundledRelaysFileURL: RelayCacheIO.preBundledRelaysFileURL!
-    )
+    static let shared: RelayCacheTracker = {
+        let cacheFileURL = RelayCacheIO.defaultCacheFileURL(forSecurityApplicationGroupIdentifier: ApplicationConfiguration.securityGroupIdentifier)!
+        let prebundledRelaysFileURL = RelayCacheIO.preBundledRelaysFileURL!
+
+        return RelayCacheTracker(
+            cacheFileURL: cacheFileURL,
+            prebundledRelaysFileURL: prebundledRelaysFileURL
+        )
+    }()
 
     private init(cacheFileURL: URL, prebundledRelaysFileURL: URL) {
         self.cacheFileURL = cacheFileURL
