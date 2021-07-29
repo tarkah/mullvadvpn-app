@@ -31,26 +31,26 @@ allowlist should be ignored. The allowlist preferably would strictly match domai
 `*.apple.com`. The allowlist is to be static, not changeable at runtime.
 - The local resolver's list of upstream resolvers should be configurable by the daemon.
 - The daemon should keep track of resolved IP addresses that should be allowed to pass through the firewall.
+- The daemon should keep track of what DNS servers should the host try to use, and apply the resolver config to our
+custom resolver.
 
-### Behavior when the daemon enters the error state due to being offline
-To enable the custom resolver when entering the offline state the daemon should do the following:
+### When the tunnel state machine starts
+1. The custom resolver should be started with approppriate custom resolvers
+
+### Behavior when the daemon enters the error state
+To enable the custom resolver when entering the error state the daemon should do the following:
 1. Configure the host to use our local resolver
 1. Exclude the local resolver's traffic from the firewall
-1. Run the local resolver with the appropriate configuration - the appropriate upstream resolvers and an allowlist of
-    domains that should be resolved.
 
 ### Resolver's behavior when receiving a DNS query
-- When the daemon is not in the offline error state, the query should be dropped
-- When the daemon is in the offline error state, and the query does not match the allowlist, it should be dropped
-    without a response
-- When the daemon is in the offline error state, and the query does match the allowlist:
+- When the daemon is not in the error state, the query should be dropped
+- When the daemon is in the error state, and the query does match the allowlist:
   1. The query should be forwarded to the upstream resolvers
   1. When receiving the response, it's `A` and `AAAA` records should be allowed through the firewall.
   1. The response should be forwarded to the original requester.
 
-### When the daemon leaves the offline error state:
+### When the daemon leaves the error state:
 - The host's configuration should be changed to not use `127.0.0.1:53` as a resolver.
-- The resolver should be shut down, to no longer listen on `127.0.0.1:53`.
 - The list of IP addresses that are allowed to pass through our firewall should be cleared.
 
 ## Implementation details
