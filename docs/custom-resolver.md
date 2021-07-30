@@ -66,7 +66,8 @@ To enable the custom resolver when entering the error state the daemon should do
 ### Behavior when the resovler is disabled
 #### When the resolver setting is enabled
 1. The custom resolver should be started with a GID that let's the firewall identify it's traffic, it should listen on
-   port 53, with the host's current resolvers as the upstream resolvers.
+   port 53, with the host's current resolvers as the upstream resolvers. If starting the resolver fails, the frontends
+   should be notified of the failure.
 1. The firewall should be reset to allow resolver's traffic.
 1. If the daemon is in the error state, the host should be configured to use the custom resolver.
 
