@@ -8,6 +8,7 @@
 
 import Foundation
 import Logging
+import os
 
 func initLoggingSystem(bundleIdentifier: String) {
     let containerURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: ApplicationConfiguration.securityGroupIdentifier)!
@@ -24,11 +25,6 @@ func initLoggingSystem(bundleIdentifier: String) {
     // Create an array of log output streams
     var streams: [TextOutputStream] = []
 
-    #if DEBUG
-    // Add standard output logging in debug
-    streams.append(TextFileOutputStream.standardOutputStream())
-    #endif
-
     // Create output stream to file
     if let fileLogStream = TextFileOutputStream(fileURL: logFileURL, createFile: true) {
         streams.append(fileLogStream)
@@ -36,10 +32,20 @@ func initLoggingSystem(bundleIdentifier: String) {
 
     // Configure Logging system
     LoggingSystem.bootstrap { (label) -> LogHandler in
-        if streams.isEmpty {
+        var logHandlers: [LogHandler] = []
+
+        #if DEBUG
+        logHandlers.append(OSLogHandler(subsystem: bundleIdentifier, category: label))
+        #endif
+
+        if !streams.isEmpty {
+            logHandlers.append(CustomFormatLogHandler(label: label, streams: streams))
+        }
+
+        if logHandlers.isEmpty {
             return SwiftLogNoOpLogHandler()
         } else {
-            return CustomFormatLogHandler(label: label, streams: streams)
+            return MultiplexLogHandler(logHandlers)
         }
     }
 
