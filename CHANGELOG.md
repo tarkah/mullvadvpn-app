@@ -28,6 +28,10 @@ Line wrap the file at 100 chars.                                              Th
 - Added possibility to filter locations by provider in the desktop app.
 - Add WireGuard over TCP CLI option for all relays.
 
+#### Windows
+- Add opt-in support for NT kernel WireGuard driver. It can be enabled by setting
+  `TALPID_FORCE_USERSPACE_WIREGUARD=0`.
+
 ### Changed
 - Only use the account history file to store the last used account.
 - Update the out of time-view and new account-view to make it more user friendly.
