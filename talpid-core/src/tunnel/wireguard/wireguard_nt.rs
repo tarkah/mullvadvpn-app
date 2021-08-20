@@ -1,4 +1,4 @@
-use super::{config::Config, stats::Stats, Tunnel};
+use super::{config::Config, logging, stats::Stats, Tunnel};
 use bitflags::bitflags;
 use ipnetwork::IpNetwork;
 use lazy_static::lazy_static;
@@ -69,15 +69,7 @@ type WireGuardSetStateFn =
     unsafe extern "stdcall" fn(adapter: RawHandle, state: WgAdapterState) -> BOOL;
 
 
-#[repr(C)]
-#[allow(dead_code)]
-enum WireGuardLoggerLevel {
-    Info,
-    Warn,
-    Err,
-}
-
-type WireGuardLoggerCb = extern "stdcall" fn(WireGuardLoggerLevel, timestamp: u64, *const u16);
+type WireGuardLoggerCb = extern "stdcall" fn(logging::NtLogLevel, timestamp: u64, *const u16);
 type WireGuardSetLoggerFn = extern "stdcall" fn(Option<WireGuardLoggerCb>);
 
 #[repr(C)]
@@ -137,6 +129,10 @@ pub enum Error {
     /// Unknown address family
     #[error(display = "Unknown address family: {}", _0)]
     UnknownAddressFamily(i32),
+
+    /// Failure to set up logging
+    #[error(display = "Failed to set up logging")]
+    InitLoggingError(#[error(source)] logging::Error),
 }
 
 pub struct WgNtTunnel {
@@ -311,10 +307,14 @@ enum WgAdapterState {
 
 
 impl WgNtTunnel {
-    pub fn start_tunnel(config: &Config, resource_dir: &Path) -> Result<Self> {
+    pub fn start_tunnel(
+        config: &Config,
+        log_path: Option<&Path>,
+        resource_dir: &Path,
+    ) -> Result<Self> {
         let dll = load_wg_nt_dll(resource_dir)?;
 
-        let logger_handle = LoggerHandle::new(dll.clone());
+        let logger_handle = LoggerHandle::new(dll.clone(), log_path)?;
 
         {
             if let Ok(device) = WgNtAdapter::open(dll.clone(), &*ADAPTER_POOL, &*ADAPTER_ALIAS) {
@@ -405,32 +405,17 @@ impl Drop for WgNtTunnel {
 struct LoggerHandle(Arc<WgNtDll>);
 
 impl LoggerHandle {
-    fn new(dll: Arc<WgNtDll>) -> Self {
-        dll.set_logger(Some(Self::callback));
-        Self(dll)
-    }
-
-    extern "stdcall" fn callback(
-        level: WireGuardLoggerLevel,
-        _timestamp: u64,
-        message: *const u16,
-    ) {
-        if message.is_null() {
-            return;
-        }
-        let message = unsafe { U16CStr::from_ptr_str(message) };
-        use WireGuardLoggerLevel::*;
-        match level {
-            Info => log::debug!("[WireGuardNT] {}", message.to_string_lossy()),
-            Warn => log::warn!("[WireGuardNT] {}", message.to_string_lossy()),
-            Err => log::error!("[WireGuardNT] {}", message.to_string_lossy()),
-        }
+    fn new(dll: Arc<WgNtDll>, log_path: Option<&Path>) -> Result<Self> {
+        logging::initialize_logging(log_path).map_err(Error::InitLoggingError)?;
+        dll.set_logger(Some(logging::nt_logging_callback));
+        Ok(Self(dll))
     }
 }
 
 impl Drop for LoggerHandle {
     fn drop(&mut self) {
         self.0.set_logger(None);
+        logging::clean_up_logging();
     }
 }
 

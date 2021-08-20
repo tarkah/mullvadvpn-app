@@ -4,7 +4,7 @@ use crate::routing;
 #[cfg(not(windows))]
 use crate::tunnel::tun_provider::TunProvider;
 use crate::tunnel::wireguard::logging::{
-    clean_up_logging, initialize_logging, logging_callback, WgLogLevel,
+    clean_up_logging, go_logging_callback, initialize_logging, WgLogLevel,
 };
 #[cfg(not(windows))]
 use ipnetwork::IpNetwork;
@@ -38,11 +38,18 @@ use crate::winnet;
 #[cfg(not(target_os = "windows"))]
 const MAX_PREPARE_TUN_ATTEMPTS: usize = 4;
 
-struct LoggingContext(u32);
+struct LoggingContext(());
+
+impl LoggingContext {
+    fn new(log_path: Option<&Path>) -> Result<Self> {
+        initialize_logging(log_path).map_err(TunnelError::LoggingError)?;
+        Ok(Self(()))
+    }
+}
 
 impl Drop for LoggingContext {
     fn drop(&mut self) {
-        clean_up_logging(self.0);
+        clean_up_logging();
     }
 }
 
@@ -73,9 +80,7 @@ impl WgGoTunnel {
         let (mut tunnel_device, tunnel_fd) = Self::get_tunnel(tun_provider, config, routes)?;
         let interface_name: String = tunnel_device.interface_name().to_string();
         let wg_config_str = config.to_userspace_format();
-        let logging_context = initialize_logging(log_path)
-            .map(LoggingContext)
-            .map_err(TunnelError::LoggingError)?;
+        let logging_context = LoggingContext::new(log_path)?;
 
         #[cfg(not(target_os = "android"))]
         let handle = unsafe {
@@ -83,8 +88,8 @@ impl WgGoTunnel {
                 config.mtu as isize,
                 wg_config_str.as_ptr() as *const i8,
                 tunnel_fd,
-                Some(logging_callback),
-                logging_context.0 as *mut libc::c_void,
+                Some(go_logging_callback),
+                std::ptr::null_mut(),
             )
         };
 
@@ -93,8 +98,8 @@ impl WgGoTunnel {
             wgTurnOn(
                 wg_config_str.as_ptr() as *const i8,
                 tunnel_fd,
-                Some(logging_callback),
-                logging_context.0 as *mut libc::c_void,
+                Some(go_logging_callback),
+                std::ptr::null_mut(),
             )
         };
 
@@ -136,9 +141,7 @@ impl WgGoTunnel {
         let iface_name: String = "Mullvad".to_string();
         let cstr_iface_name =
             CString::new(iface_name.as_bytes()).map_err(TunnelError::InterfaceNameError)?;
-        let logging_context = initialize_logging(log_path)
-            .map(LoggingContext)
-            .map_err(TunnelError::LoggingError)?;
+        let logging_context = LoggingContext::new(log_path)?;
 
         let wait_on_ipv6 = config.ipv6_gateway.is_some()
             || config.tunnel.addresses.iter().any(|ip| ip.is_ipv6())
@@ -158,8 +161,8 @@ impl WgGoTunnel {
                 wg_config_str.as_ptr(),
                 &mut alias_ptr,
                 &mut interface_luid,
-                Some(logging_callback),
-                logging_context.0 as *mut libc::c_void,
+                Some(go_logging_callback),
+                std::ptr::null_mut(),
             )
         };
 
