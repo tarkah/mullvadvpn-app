@@ -241,6 +241,7 @@ const StyledInputFiller = styled.div({
 });
 
 interface IRowInputProps {
+  initialValue?: string;
   onChange?: (value: string) => void;
   onSubmit: (value: string) => void;
   onFocus?: (event: React.FocusEvent<HTMLTextAreaElement>) => void;
@@ -252,7 +253,7 @@ interface IRowInputProps {
 }
 
 export function RowInput(props: IRowInputProps) {
-  const [value, setValue] = useState('');
+  const [value, setValue] = useState(props.initialValue ?? '');
   const textAreaRef = useRef() as React.RefObject<HTMLTextAreaElement>;
 
   const submit = useCallback(() => props.onSubmit(value), [props.onSubmit, value]);
@@ -285,14 +286,16 @@ export function RowInput(props: IRowInputProps) {
   );
 
   useEffect(() => {
-    if (props.autofocus) {
-      textAreaRef.current?.focus();
+    if (props.autofocus && textAreaRef.current) {
+      textAreaRef.current.focus();
+      textAreaRef.current.selectionStart = textAreaRef.current.selectionEnd = value.length;
     }
   }, []);
 
   useEffect(() => {
-    if (props.invalid) {
-      textAreaRef.current?.focus();
+    if (props.invalid && textAreaRef.current) {
+      textAreaRef.current.focus();
+      textAreaRef.current.selectionStart = textAreaRef.current.selectionEnd = value.length;
     }
   }, [props.invalid]);
 
