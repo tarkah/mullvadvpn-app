@@ -17,18 +17,22 @@ struct OSLogHandler: LogHandler {
     private let label: String
     private let osLog: OSLog
 
-    static var osLogRegistry: [String: [String: OSLog]] = [:]
-    static let registryLock = NSLock()
+    private struct RegistryKey: Hashable {
+        let subsystem: String
+        let category: String
+    }
+
+    private static var osLogRegistry: [RegistryKey: OSLog] = [:]
+    private static let registryLock = NSLock()
 
     private static func getOSLog(subsystem: String, category: String) -> OSLog {
         return registryLock.withCriticalBlock {
-            var perSubsystem = osLogRegistry[subsystem] ?? [:]
-            if let log = perSubsystem[category] {
+            let key = RegistryKey(subsystem: subsystem, category: category)
+            if let log = osLogRegistry[key] {
                 return log
             } else {
                 let newLog = OSLog(subsystem: subsystem, category: category)
-                perSubsystem[category] = newLog
-                osLogRegistry[subsystem] = perSubsystem
+                osLogRegistry[key] = newLog
                 return newLog
             }
         }
