@@ -77,7 +77,7 @@ extension Logging.Logger.Level {
     var osLogType: OSLogType {
         switch self {
         case .trace, .debug:
-            // Console app does not output .debug logs, so mark all .debug logs as .info level.
+            // Console app does not output .debug logs, use .info instead.
             return .info
         case .info, .notice, .warning:
             return .info
