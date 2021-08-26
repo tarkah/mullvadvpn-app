@@ -8,7 +8,6 @@
 
 import Foundation
 import Logging
-import os
 
 func initLoggingSystem(bundleIdentifier: String) {
     let containerURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: ApplicationConfiguration.securityGroupIdentifier)!
